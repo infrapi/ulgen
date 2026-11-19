@@ -1,0 +1,37 @@
+# thanos configuration example.
+listen: ":8080"
+path: /mcp
+
+kayra:
+  url: https://kayra.example.com       # userinfo, /check, /memberships
+  cache_ttl: 1m                        # caller resolution cache (/check is never cached)
+
+vault:                                 # tenant credentials (KV v2), AppRole login
+  address: https://vault.example.com:8200
+  role_id_env: THANOS_VAULT_ROLE_ID
+  secret_id_file: /run/secrets/thanos-vault-secret-id
+
+tools_ttl: 5m                          # upstream tools are listed again after this
+credential_ttl: 1m                     # a credential read from Vault is kept this long
+
+upstreams:
+  # mcp-grafana: no notion of tenant; one Grafana service account per tenant
+  # org, its token in Vault. thanos asks Kayra /check before each call.
+  - name: grafana
+    url: http://mcp-grafana:8000/mcp
+    api: grafana.example.io            # Kayra ApiRegistration served by thanos' own spec
+    authorize: thanos
+    credential:
+      vault: {mount: secret, path: "mcp-gateway/grafana/{tenant}", key: token}
+      header: X-Grafana-Service-Account-Token
+    tenant: {inject: true}
+    headers_from_env:
+      Authorization: MCP_GRAFANA_CALLER_AUTH   # "Bearer <mcp-grafana --server-auth-token>"
+
+  # An infrapi/lib MCP: it checks every call itself with the caller's token.
+  - name: telemetry
+    url: https://api.example.com/apis/telemetry.example.io/v1/-/mcp
+    api: telemetry.example.io
+    authorize: upstream
+    credential: {passthrough: true}
+    tenant: {argument: namespace}

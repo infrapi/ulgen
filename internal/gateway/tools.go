@@ -1,0 +1,144 @@
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/infrapi/thanos/internal/config"
+)
+
+// tenantArg is the argument every tenant-scoped tool takes, whatever its
+// upstream calls it.
+const tenantArg = "tenant"
+
+const tenantDescription = "Tenant to act in (a Kayra namespace). The list_tenants tool gives the ones you belong to."
+
+// tool is one upstream tool as thanos exposes it.
+type tool struct {
+	upstream *upstream
+	// original is the upstream's own name.
+	original string
+	// exposed is the tool as listed to clients.
+	exposed *mcp.Tool
+	// scoped: the tool takes a tenant.
+	scoped bool
+	// verb is what /check is asked for (authorize: thanos).
+	verb string
+}
+
+// verbOf maps a tool's MCP annotations to the Kayra verb its call needs
+// on resource "tools": read-only tools need "get", destructive ones
+// "delete", the other writes "create". MCP says a tool without
+// annotations is neither read-only nor non-destructive, so it needs
+// "delete": a tool nobody described gets the strictest check.
+func verbOf(t *mcp.Tool) string {
+	a := t.Annotations
+	switch {
+	case a == nil:
+		return "delete"
+	case a.ReadOnlyHint:
+		return "get"
+	case a.DestructiveHint == nil || *a.DestructiveHint:
+		return "delete"
+	default:
+		return "create"
+	}
+}
+
+// expose builds the exposed form of an upstream tool, or explains why it
+// can't be exposed.
+func expose(u *upstream, t *mcp.Tool) (*tool, error) {
+	schema, err := objectSchema(t.InputSchema)
+	if err != nil {
+		return nil, err
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+	}
+	required := stringList(schema["required"])
+
+	scoped := false
+	switch {
+	case u.cfg.Tenant.Inject:
+		if _, taken := props[tenantArg]; taken {
+			return nil, fmt.Errorf("it already has a %q argument", tenantArg)
+		}
+		props[tenantArg] = map[string]any{"type": "string", "description": tenantDescription}
+		required = append(required, tenantArg)
+		scoped = true
+	case u.cfg.Tenant.Argument != "":
+		own, ok := props[u.cfg.Tenant.Argument]
+		if !ok {
+			break // not tenant-scoped: exposed as is
+		}
+		if _, taken := props[tenantArg]; taken && u.cfg.Tenant.Argument != tenantArg {
+			return nil, fmt.Errorf("it has both %q and %q arguments", u.cfg.Tenant.Argument, tenantArg)
+		}
+		delete(props, u.cfg.Tenant.Argument)
+		arg, _ := own.(map[string]any)
+		renamed := map[string]any{"type": "string"}
+		for k, v := range arg {
+			renamed[k] = v
+		}
+		renamed["description"] = tenantDescription
+		props[tenantArg] = renamed
+		required = slices.DeleteFunc(required, func(s string) bool { return s == u.cfg.Tenant.Argument })
+		required = append(required, tenantArg)
+		scoped = true
+	}
+	if u.cfg.Authorize == config.AuthorizeThanos && !scoped {
+		return nil, fmt.Errorf("it names no tenant to check")
+	}
+
+	schema["type"] = "object"
+	schema["properties"] = props
+	if len(required) > 0 {
+		slices.Sort(required)
+		schema["required"] = slices.Compact(required)
+	}
+
+	exposed := &mcp.Tool{
+		Name:         u.cfg.Name + "_" + t.Name,
+		Title:        t.Title,
+		Description:  t.Description,
+		InputSchema:  schema,
+		OutputSchema: t.OutputSchema,
+		Annotations:  t.Annotations,
+	}
+	return &tool{upstream: u, original: t.Name, exposed: exposed, scoped: scoped, verb: verbOf(t)}, nil
+}
+
+// objectSchema returns a deep copy of an input schema as a JSON object.
+func objectSchema(s any) (map[string]any, error) {
+	if s == nil {
+		return map[string]any{"type": "object"}, nil
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("its input schema doesn't encode: %w", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil || m == nil {
+		return nil, fmt.Errorf("its input schema is not a JSON object")
+	}
+	if t, ok := m["type"]; ok && t != "object" {
+		return nil, fmt.Errorf("its input schema is not of type object")
+	}
+	return m, nil
+}
+
+func stringList(v any) []string {
+	var out []string
+	if list, ok := v.([]any); ok {
+		for _, x := range list {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
