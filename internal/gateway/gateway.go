@@ -159,9 +159,9 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		tok = strings.TrimSpace(tok)
 		if !ok || tok == "" {
-			// The MCP handshake alone, without a token: a gateway's health
-			// check (LiteLLM's opens a session, no user behind it). It
-			// reaches no tool and no upstream.
+			// The MCP handshake and tools/list, without a token: a gateway's
+			// health check and UI (LiteLLM's, no user behind them). The tool
+			// list is the same for everyone; calling a tool takes a token.
 			if handshake, err := isHandshake(r); err != nil {
 				http.Error(w, "unreadable request", http.StatusBadRequest)
 				return
@@ -189,7 +189,9 @@ func (g *Gateway) Handler() http.Handler {
 }
 
 // handshakeMethods are the JSON-RPC messages served without a token.
-var handshakeMethods = map[string]bool{"initialize": true, "notifications/initialized": true, "ping": true}
+var handshakeMethods = map[string]bool{
+	"initialize": true, "notifications/initialized": true, "ping": true, "tools/list": true,
+}
 
 // maxHandshakeBody bounds what is read of a request without a token.
 const maxHandshakeBody = 64 << 10
@@ -256,10 +258,26 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 	}
 
 	next := map[string]*tool{}
+	complete := true // every upstream listed: the next refresh can wait toolsTTL
 	for _, u := range g.upstreams {
 		headers := http.Header{}
 		if u.cfg.Credential.Passthrough {
-			headers.Set("Authorization", "Bearer "+token(ctx))
+			tok := token(ctx)
+			if tok == "" {
+				tok = g.listToken()
+			}
+			if tok == "" {
+				// no caller and no list token: keep what an earlier listing found,
+				// and list again as soon as a caller's token comes
+				complete = false
+				for name, t := range g.tools {
+					if t.upstream == u {
+						next[name] = t
+					}
+				}
+				continue
+			}
+			headers.Set("Authorization", "Bearer "+tok)
 		}
 		listed, err := u.client.listTools(ctx, headers)
 		if err != nil {
@@ -301,7 +319,22 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 		g.servers[t.upstream.cfg.Name].AddTool(&own, g.call(t))
 	}
 	g.tools = next
-	g.refreshed = g.now()
+	if complete {
+		g.refreshed = g.now()
+	}
+}
+
+// listToken is list_token_file's token, "" when unset or unreadable.
+func (g *Gateway) listToken() string {
+	if g.cfg.ListTokenFile == "" {
+		return ""
+	}
+	data, err := os.ReadFile(g.cfg.ListTokenFile)
+	if err != nil {
+		g.log.Warn("reading list_token_file", "error", err)
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // toolResult is a tool error the model can read and act on.

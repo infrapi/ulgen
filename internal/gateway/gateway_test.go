@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -352,33 +354,79 @@ func TestListTenants(t *testing.T) {
 	}
 }
 
-func TestHandshakeWithoutToken(t *testing.T) {
-	h := newHarness(t)
-	// A health check: a session opens without any token...
+func anonymous(t *testing.T, h *harness, path string) *mcp.ClientSession {
+	t.Helper()
 	c := mcp.NewClient(&mcp.Implementation{Name: "health"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.thanos.URL + "/mcp/grafana", MaxRetries: -1}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
+	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.thanos.URL + path, MaxRetries: -1},
+		&mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
 	if err != nil {
 		t.Fatalf("handshake without a token: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	})
+	return s
+}
+
+func toolNames(t *testing.T, s *mcp.ClientSession) []string {
+	t.Helper()
+	res, err := s.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	for _, tl := range res.Tools {
+		names = append(names, tl.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// TestWithoutToken: a gateway's health check and UI (no user) open a
+// session and list the tools; calling one takes a caller's token.
+func TestWithoutToken(t *testing.T) {
+	h := newHarness(t)
+	s := anonymous(t, h, "/mcp")
 	if err := s.Ping(context.Background(), nil); err != nil {
 		t.Errorf("ping without a token: %v", err)
 	}
-	// ...but nothing else.
-	if _, err := s.ListTools(context.Background(), nil); err == nil {
-		t.Errorf("tools/list without a token answered")
+	// telemetry wants a token even to list: without list_token_file, not listed yet
+	names := toolNames(t, s)
+	if !slices.Contains(names, "grafana_query_prometheus") || slices.Contains(names, "telemetry_list_dashboards") {
+		t.Errorf("anonymous tools/list = %v", names)
 	}
-	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "query_prometheus", Arguments: map[string]any{"tenant": "acme"}}); err == nil {
+	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "grafana_query_prometheus", Arguments: map[string]any{"tenant": "acme", "expr": "up"}}); err == nil {
 		t.Errorf("tools/call without a token answered")
 	}
-	if err := s.Close(); err != nil {
-		t.Logf("close: %v", err)
+
+	// a caller's listing completes the catalogue at once (the anonymous one did not start the TTL)...
+	if names := toolNames(t, h.session(t, "alice-token")); !slices.Contains(names, "telemetry_list_dashboards") {
+		t.Errorf("caller's tools/list = %v", names)
+	}
+	// ...which anonymous listings then show
+	if names := toolNames(t, anonymous(t, h, "/mcp/telemetry")); !slices.Contains(names, "list_dashboards") {
+		t.Errorf("anonymous /mcp/telemetry after a caller = %v", names)
+	}
+}
+
+func TestListTokenFile(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(t.TempDir(), "list-token")
+	if err := os.WriteFile(path, []byte("bob-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.g.cfg.ListTokenFile = path
+	if names := toolNames(t, anonymous(t, h, "/mcp/telemetry")); !slices.Contains(names, "list_dashboards") {
+		t.Errorf("anonymous /mcp/telemetry with list_token_file = %v", names)
 	}
 }
 
 func TestCallersMustAuthenticate(t *testing.T) {
 	h := newHarness(t)
 	for _, tok := range []string{"", "forged"} {
-		req, err := http.NewRequest(http.MethodPost, h.thanos.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req, err := http.NewRequest(http.MethodPost, h.thanos.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tenants"}}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -528,7 +576,7 @@ func TestTokenHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
-	if _, err := s.ListTools(context.Background(), nil); err == nil {
+	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "telemetry_list_dashboards", Arguments: map[string]any{"tenant": "acme"}}); err == nil {
 		t.Errorf("Authorization accepted while token_header is X-Kayra-Token")
 	}
 	if err := s.Close(); err != nil {

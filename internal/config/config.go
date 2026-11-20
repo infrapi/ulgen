@@ -25,6 +25,12 @@ type Config struct {
 	// MCP servers forward (extra_headers): LiteLLM withholds Authorization
 	// from client-forwarded servers listed together (RFC 9700).
 	TokenHeader string `yaml:"token_header"`
+	// ListTokenFile, optional, holds a Kayra token of thanos' own, re-read
+	// at each listing: what lists the tools of a passthrough upstream (one
+	// that wants a token for anything, an infrapi/lib MCP) when tools/list
+	// comes without a caller's token — a gateway's UI listing the tools of
+	// its servers. Never used to call a tool.
+	ListTokenFile string `yaml:"list_token_file"`
 	// Kayra resolves callers (userinfo), decides (/check) and lists their
 	// tenants (/memberships).
 	Kayra KayraConfig `yaml:"kayra"`

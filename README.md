@@ -48,10 +48,13 @@ Nothing is configured per tool:
 - **Which tools a person sees** is not thanos' business: the gateway in
   front decides (LiteLLM's allowed tools).
 
-Every request but the MCP handshake (`initialize`, `notifications/initialized`, `ping`: a gateway's health
-check, LiteLLM's included, reaching no tool and no upstream) must carry a token Kayra resolves, in `token_header` (`Authorization` by default; behind
-LiteLLM, a dedicated `X-Kayra-Token` that its MCP servers forward with `extra_headers`: LiteLLM withholds the
-client's `Authorization` from client-forwarded servers listed together on `/mcp`, RFC 9700), resolved by Kayra (`/oauth2/userinfo`,
+The MCP handshake and `tools/list` (`initialize`, `notifications/initialized`, `ping`, `tools/list`) need no
+token: a gateway's health check and UI (LiteLLM's) have no user behind them, and the tool list is the same for
+everyone. Without a caller, a passthrough upstream is listed with `list_token_file` (a Kayra token of thanos'
+own, never used to call a tool), or keeps the tools a caller's listing found. Every tool call takes the
+caller's token, in `token_header` (`Authorization` by default; behind LiteLLM, a dedicated `X-Kayra-Token` that
+its MCP servers forward with `extra_headers`: LiteLLM withholds the client's `Authorization` from
+client-forwarded servers listed together on `/mcp`, RFC 9700), resolved by Kayra (`/oauth2/userinfo`,
 cached `kayra.cache_ttl`); `/check` is never cached.
 
 ## Run
