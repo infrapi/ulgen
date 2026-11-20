@@ -46,10 +46,12 @@ type Gateway struct {
 	kayra     Kayra
 	creds     credentials.Source
 	upstreams []*upstream
-	server    *mcp.Server
-	log       *slog.Logger
-	toolsTTL  time.Duration
-	now       func() time.Time
+	// servers: "" is the aggregate (every upstream, tools "<upstream>_<tool>"), then one per upstream, its
+	// tools under their own names: a gateway in front (LiteLLM) sees one MCP server per service.
+	servers  map[string]*mcp.Server
+	log      *slog.Logger
+	toolsTTL time.Duration
+	now      func() time.Time
 
 	mu        sync.Mutex
 	tools     map[string]*tool
@@ -101,18 +103,28 @@ func New(cfg *config.Config, opts Options) (*Gateway, error) {
 		g.upstreams = append(g.upstreams, &upstream{cfg: uc, client: newUpstreamClient(uc.URL, uc.ProtocolVersion, static, opts.Transport, log)})
 	}
 
-	g.server = mcp.NewServer(&mcp.Implementation{Name: "thanos", Version: "v1"}, &mcp.ServerOptions{
-		Instructions: "Tools of several services, each prefixed by its service. A tool acting on a tenant takes a `tenant` argument: call " +
-			listTenantsTool + " first to know the tenants you belong to, and ask the user which one when there are several.",
+	g.servers = map[string]*mcp.Server{"": g.newServer("thanos",
+		"Tools of several services, each prefixed by its service.", g.upstreams)}
+	for _, u := range g.upstreams {
+		g.servers[u.cfg.Name] = g.newServer("thanos-"+u.cfg.Name, "Tools of "+u.cfg.Name+".", []*upstream{u})
+	}
+	return g, nil
+}
+
+// newServer is one MCP server of thanos, with list_tenants over ups.
+func (g *Gateway) newServer(name, intro string, ups []*upstream) *mcp.Server {
+	srv := mcp.NewServer(&mcp.Implementation{Name: name, Version: "v1"}, &mcp.ServerOptions{
+		Instructions: intro + " A tool acting on a tenant takes a `tenant` argument: call " + listTenantsTool +
+			" first to know the tenants you belong to, and ask the user which one when there are several.",
 	})
-	g.server.AddTool(&mcp.Tool{
+	srv.AddTool(&mcp.Tool{
 		Name:        listTenantsTool,
 		Description: "List the tenants (Kayra namespaces) you are in, with the services usable in each.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, g.listTenants)
-	g.server.AddReceivingMiddleware(g.refreshOnList)
-	return g, nil
+	}, g.listTenants(ups))
+	srv.AddReceivingMiddleware(g.refreshOnList)
+	return srv
 }
 
 // Close ends the upstream sessions.
@@ -123,11 +135,20 @@ func (g *Gateway) Close() {
 }
 
 // Handler serves MCP (Streamable HTTP, stateless) behind bearer
-// authentication: every request carries a token Kayra resolves.
+// authentication: every request carries a token Kayra resolves. The
+// configured path serves every upstream, <path>/<upstream> one of them.
 func (g *Gateway) Handler() http.Handler {
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return g.server },
-		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	base := strings.TrimRight(g.cfg.Path, "/")
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		name := strings.Trim(strings.TrimPrefix(r.URL.Path, base), "/")
+		return g.servers[name] // nil: 404
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.Trim(strings.TrimPrefix(r.URL.Path, base), "/")
+		if _, ok := g.servers[name]; !ok || !strings.HasPrefix(r.URL.Path, base) {
+			http.NotFound(w, r)
+			return
+		}
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		tok = strings.TrimSpace(tok)
 		if !ok || tok == "" {
@@ -154,11 +175,21 @@ func unauthorized(w http.ResponseWriter, msg string) {
 }
 
 // refreshOnList refreshes the aggregated tools before answering a
-// tools/list, at most every ToolsTTL.
+// tools/list, at most every ToolsTTL, and before a tools/call when they
+// were never listed (a gateway in front calls from its own cached list,
+// right after thanos restarted).
 func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		if method == "tools/list" {
+		switch method {
+		case "tools/list":
 			g.refresh(ctx, false)
+		case "tools/call":
+			g.mu.Lock()
+			never := g.refreshed.IsZero()
+			g.mu.Unlock()
+			if never {
+				g.refresh(ctx, false)
+			}
 		}
 		return next(ctx, method, req)
 	}
@@ -199,17 +230,24 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 		}
 	}
 
-	var gone []string
-	for name := range g.tools {
+	// The aggregate: every tool under its prefixed name; each upstream's
+	// server: its own tools under their upstream names.
+	for name, old := range g.tools {
 		if _, ok := next[name]; !ok {
-			gone = append(gone, name)
+			g.servers[""].RemoveTools(name)
+			if old.original != listTenantsTool {
+				g.servers[old.upstream.cfg.Name].RemoveTools(old.original)
+			}
 		}
 	}
-	if len(gone) > 0 {
-		g.server.RemoveTools(gone...)
-	}
 	for _, t := range next {
-		g.server.AddTool(t.exposed, g.call(t))
+		g.servers[""].AddTool(t.exposed, g.call(t))
+		if t.original == listTenantsTool {
+			continue // thanos' own on that server; the upstream's stays reachable on the aggregate
+		}
+		own := *t.exposed
+		own.Name = t.original
+		g.servers[t.upstream.cfg.Name].AddTool(&own, g.call(t))
 	}
 	g.tools = next
 	g.refreshed = g.now()
@@ -288,10 +326,17 @@ type tenantEntry struct {
 	Services []string `json:"services"`
 }
 
-// listTenants answers list_tenants: the caller's namespaces (Kayra), each
-// with the upstreams usable there: those whose tenant_check Kayra's /check
-// allows, and those without one.
-func (g *Gateway) listTenants(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// listTenants answers list_tenants over ups: the caller's namespaces
+// (Kayra), each with the upstreams of ups usable there: those whose
+// tenant_check Kayra's /check allows, and those without one. A namespace
+// where none is usable is left out.
+func (g *Gateway) listTenants(ups []*upstream) mcp.ToolHandler {
+	return func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return g.tenants(ctx, ups)
+	}
+}
+
+func (g *Gateway) tenants(ctx context.Context, ups []*upstream) (*mcp.CallToolResult, error) {
 	tok := token(ctx)
 	namespaces, err := g.kayra.Namespaces(ctx, tok)
 	if err != nil {
@@ -301,7 +346,7 @@ func (g *Gateway) listTenants(ctx context.Context, _ *mcp.CallToolRequest) (*mcp
 	out := make([]tenantEntry, 0, len(namespaces))
 	for _, ns := range namespaces {
 		var services []string
-		for _, u := range g.upstreams {
+		for _, u := range ups {
 			chk := u.cfg.TenantCheck
 			if chk == nil {
 				services = append(services, u.cfg.Name)

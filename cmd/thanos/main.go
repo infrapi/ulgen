@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,7 +65,9 @@ func run() error {
 	defer g.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle(cfg.Path, g.Handler())
+	mcpHandler := g.Handler()
+	mux.Handle(cfg.Path, mcpHandler)
+	mux.Handle(strings.TrimRight(cfg.Path, "/")+"/", mcpHandler) // <path>/<upstream>
 	mux.Handle("/apis/", g.SpecHandler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

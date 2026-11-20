@@ -10,6 +10,11 @@ MCP client ──► (gateway: LiteLLM, ...) ──Bearer <caller's Kayra token>
                                                                                   └─► telemetry MCP (caller's token)
 ```
 
+Endpoints: `<path>` (`/mcp`) serves every upstream, tools named `<upstream>_<tool>`; `<path>/<upstream>`
+(`/mcp/grafana`) serves one upstream, its tools under their own names, each with `list_tenants`. A gateway in
+front (LiteLLM) then declares one MCP server per service, each with its own allowed tools, access groups and
+limits, all of them thanos.
+
 Nothing is configured per tool:
 
 - **Tools are discovered** from each upstream (`tools/list`, refreshed every

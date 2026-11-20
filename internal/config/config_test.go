@@ -47,16 +47,16 @@ func TestLoad(t *testing.T) {
 	}
 
 	cases := map[string]struct{ from, to, want string }{
-		"unknown field":         {"tenant: {inject: true}", "tenant: {inject: true}\n    typo: 1", "typo"},
-		"bad name":              {"name: grafana", "name: Grafana", "lowercase"},
-		"duplicate":             {"name: telemetry", "name: grafana", "duplicated"},
-		"thanos without api":    {"api: grafana.example.io", "api: \"\"", "needs api"},
-		"upstream needs caller": {"credential: {passthrough: true}", "credential: {vault: {mount: s, path: p, key: k}, header: H}", "passthrough"},
-		"both credentials":      {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
-		"bad authorize":         {"authorize: upstream", "authorize: nobody", "authorize"},
-		"no vault":              {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
+		"unknown field":             {"tenant: {inject: true}", "tenant: {inject: true}\n    typo: 1", "typo"},
+		"bad name":                  {"name: grafana", "name: Grafana", "lowercase"},
+		"duplicate":                 {"name: telemetry", "name: grafana", "duplicated"},
+		"thanos without api":        {"api: grafana.example.io", "api: \"\"", "needs api"},
+		"upstream needs caller":     {"credential: {passthrough: true}", "credential: {vault: {mount: s, path: p, key: k}, header: H}", "passthrough"},
+		"both credentials":          {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
+		"bad authorize":             {"authorize: upstream", "authorize: nobody", "authorize"},
+		"no vault":                  {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
 		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
-		"missing env header":    {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: THANOS_TEST_UNSET}", "THANOS_TEST_UNSET"},
+		"missing env header":        {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: THANOS_TEST_UNSET}", "THANOS_TEST_UNSET"},
 	}
 	for desc, tc := range cases {
 		content := strings.Replace(base, tc.from, tc.to, 1)

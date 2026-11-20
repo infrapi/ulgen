@@ -177,7 +177,9 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(g.Close)
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", g.Handler())
+	h := g.Handler()
+	mux.Handle("/mcp", h)
+	mux.Handle("/mcp/", h)
 	mux.Handle("/apis/", g.SpecHandler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -194,9 +196,14 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func (h *harness) session(t *testing.T, token string) *mcp.ClientSession {
 	t.Helper()
+	return h.sessionAt(t, token, "/mcp")
+}
+
+func (h *harness) sessionAt(t *testing.T, token, path string) *mcp.ClientSession {
+	t.Helper()
 	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
 	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: h.thanos.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{token}}, MaxRetries: -1,
+		Endpoint: h.thanos.URL + path, HTTPClient: &http.Client{Transport: bearer{token}}, MaxRetries: -1,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -404,5 +411,61 @@ func TestVerbOf(t *testing.T) {
 		if got := verbOf(&mcp.Tool{Annotations: a}); got != "delete" {
 			t.Errorf("verbOf(%+v) = %s, want delete", a, got)
 		}
+	}
+}
+
+func TestOneServerPerUpstream(t *testing.T) {
+	h := newHarness(t)
+	g := h.sessionAt(t, "alice-token", "/mcp/grafana")
+	res, err := g.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	for _, tl := range res.Tools {
+		names = append(names, tl.Name)
+	}
+	slices.Sort(names)
+	if want := []string{"create_folder", "delete_dashboard", "list_tenants", "query_prometheus"}; !slices.Equal(names, want) {
+		t.Fatalf("/mcp/grafana tools = %v, want %v", names, want)
+	}
+	out, isErr := callText(t, g, "query_prometheus", map[string]any{"tenant": "acme", "expr": "up"})
+	if isErr || !strings.Contains(out, "token:sa-acme") {
+		t.Errorf("/mcp/grafana query: %v %s", isErr, out)
+	}
+	if out, isErr := callText(t, g, "delete_dashboard", map[string]any{"tenant": "globex", "uid": "x"}); !isErr || !strings.Contains(out, "get only") {
+		t.Errorf("/mcp/grafana delete on globex: %v %s", isErr, out)
+	}
+
+	tel := h.sessionAt(t, "alice-token", "/mcp/telemetry")
+	if out, _ := callText(t, tel, "list_tenants", nil); out != `{"tenants":[{"tenant":"acme","services":["telemetry"]}]}` {
+		t.Errorf("/mcp/telemetry list_tenants = %s", out)
+	}
+	if out, isErr := callText(t, tel, "list_dashboards", map[string]any{"tenant": "acme"}); isErr || !strings.Contains(out, "Bearer alice-token") {
+		t.Errorf("/mcp/telemetry call: %v %s", isErr, out)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, h.thanos.URL+"/mcp/nope", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer alice-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("/mcp/nope: %d", resp.StatusCode)
+	}
+}
+
+func TestCallBeforeAnyList(t *testing.T) {
+	h := newHarness(t)
+	out, isErr := callText(t, h.session(t, "alice-token"), "grafana_query_prometheus", map[string]any{"tenant": "acme", "expr": "up"})
+	if isErr || !strings.Contains(out, "token:sa-acme") {
+		t.Errorf("first call without tools/list: %v %s", isErr, out)
 	}
 }
