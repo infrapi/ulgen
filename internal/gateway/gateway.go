@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -108,7 +107,7 @@ func New(cfg *config.Config, opts Options) (*Gateway, error) {
 	})
 	g.server.AddTool(&mcp.Tool{
 		Name:        listTenantsTool,
-		Description: "List the tenants (Kayra namespaces) you belong to, with the services usable in each.",
+		Description: "List the tenants (Kayra namespaces) you are in, with the services usable in each.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, g.listTenants)
@@ -289,36 +288,41 @@ type tenantEntry struct {
 	Services []string `json:"services"`
 }
 
-// listTenants answers list_tenants: per tenant, the upstreams usable in it
-// (Kayra /memberships, filtered on each upstream's api).
+// listTenants answers list_tenants: the caller's namespaces (Kayra), each
+// with the upstreams usable there: those whose tenant_check Kayra's /check
+// allows, and those without one.
 func (g *Gateway) listTenants(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	tok := token(ctx)
-	byAPI := map[string][]string{}
-	services := map[string][]string{}
-	for _, u := range g.upstreams {
-		if u.cfg.API == "" {
-			continue
-		}
-		namespaces, ok := byAPI[u.cfg.API]
-		if !ok {
-			var err error
-			namespaces, err = g.kayra.Memberships(ctx, tok, u.cfg.API)
-			if err != nil {
-				g.log.Error("listing memberships", "api", u.cfg.API, "error", err)
+	namespaces, err := g.kayra.Namespaces(ctx, tok)
+	if err != nil {
+		g.log.Error("listing the caller's namespaces", "error", err)
+		return nil, fmt.Errorf("thanos: could not list your tenants")
+	}
+	out := make([]tenantEntry, 0, len(namespaces))
+	for _, ns := range namespaces {
+		var services []string
+		for _, u := range g.upstreams {
+			chk := u.cfg.TenantCheck
+			if chk == nil {
+				services = append(services, u.cfg.Name)
+				continue
+			}
+			allowed, _, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{Namespace: ns, Api: u.cfg.API, Resource: chk.Resource, Verb: chk.Verb})
+			var ie *infraerrors.Error
+			switch {
+			case err == nil && allowed:
+				services = append(services, u.cfg.Name)
+			case err == nil, errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500:
+				// not subscribed, no role: not usable there
+			default:
+				g.log.Error("checking a tenant", "tenant", ns, "upstream", u.cfg.Name, "error", err)
 				return nil, fmt.Errorf("thanos: could not list your tenants")
 			}
-			byAPI[u.cfg.API] = namespaces
 		}
-		for _, ns := range namespaces {
-			if !slices.Contains(services[ns], u.cfg.Name) {
-				services[ns] = append(services[ns], u.cfg.Name)
-			}
+		if len(services) > 0 {
+			sort.Strings(services)
+			out = append(out, tenantEntry{Tenant: ns, Services: services})
 		}
-	}
-	out := make([]tenantEntry, 0, len(services))
-	for ns, s := range services {
-		sort.Strings(s)
-		out = append(out, tenantEntry{Tenant: ns, Services: s})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Tenant < out[j].Tenant })
 

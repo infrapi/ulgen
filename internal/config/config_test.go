@@ -39,6 +39,9 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if c := cfg.Upstreams[0].TenantCheck; c == nil || c.Resource != "tools" || c.Verb != "get" || cfg.Upstreams[1].TenantCheck != nil {
+		t.Errorf("tenant_check defaults: %+v %+v", cfg.Upstreams[0].TenantCheck, cfg.Upstreams[1].TenantCheck)
+	}
 	if cfg.Listen != ":8080" || cfg.Path != "/mcp" || cfg.Upstreams[0].Version != "v1" || cfg.Upstreams[0].ProtocolVersion != "2025-06-18" {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
@@ -52,6 +55,7 @@ func TestLoad(t *testing.T) {
 		"both credentials":      {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
 		"bad authorize":         {"authorize: upstream", "authorize: nobody", "authorize"},
 		"no vault":              {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
+		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
 		"missing env header":    {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: THANOS_TEST_UNSET}", "THANOS_TEST_UNSET"},
 	}
 	for desc, tc := range cases {

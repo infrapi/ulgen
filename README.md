@@ -31,8 +31,15 @@ Nothing is configured per tool:
   tenant's own credential read from Vault (`vault`, path with `{tenant}`,
   sent in `header`). A Vault-credential upstream never sees the caller's
   token.
-- **`list_tenants`**: the caller's tenants and the upstreams usable in each
-  (Kayra `GET .../memberships?api=`).
+- **`list_tenants`**: the caller's namespaces (Kayra `GET
+  /apis/system.<domain>/v1/namespaces`), each with the upstreams usable there:
+  Kayra `/check` on the upstream's `tenant_check` (`tools`/`get` by default
+  with `authorize: thanos`), every one when it has none.
+- **Passing the caller's token on**: an infrapi/lib API accepts a Kayra token
+  only when its `aud` is the API or a URL the API is under. Publish the MCP
+  gateway and the APIs under one host and make that host Kayra's
+  `oauth2.resources`: the token the client gets for the gateway is then good
+  for every API behind it.
 - **Which tools a person sees** is not thanos' business: the gateway in
   front decides (LiteLLM's allowed tools).
 

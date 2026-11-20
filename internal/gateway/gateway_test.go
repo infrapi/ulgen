@@ -41,6 +41,12 @@ func (k *fakeKayra) Authorize(_ context.Context, token string, req auth.Authoriz
 	if token != "alice-token" {
 		return false, "you are not a member of namespace " + req.Namespace, nil
 	}
+	if req.Api == "telemetry.example.io" {
+		if req.Namespace != "acme" {
+			return false, "", infraerrors.New(http.StatusForbidden, "test", "namespace %q is not subscribed", req.Namespace)
+		}
+		return true, "", nil
+	}
 	switch {
 	case req.Namespace == "acme":
 		return true, "", nil
@@ -52,14 +58,11 @@ func (k *fakeKayra) Authorize(_ context.Context, token string, req auth.Authoriz
 	return false, "", infraerrors.New(http.StatusNotFound, "test", "namespace %q not found", req.Namespace)
 }
 
-func (k *fakeKayra) Memberships(_ context.Context, token, api string) ([]string, error) {
+func (k *fakeKayra) Namespaces(_ context.Context, token string) ([]string, error) {
 	if token != "alice-token" {
 		return nil, nil
 	}
-	if api == "grafana.example.io" {
-		return []string{"acme", "globex"}, nil
-	}
-	return []string{"acme"}, nil
+	return []string{"acme", "globex"}, nil
 }
 
 type fakeCreds map[string]string
@@ -158,8 +161,9 @@ func newHarness(t *testing.T) *harness {
 			},
 			{
 				Name: "telemetry", URL: telemetryUpstream(t).URL, API: "telemetry.example.io", Authorize: config.AuthorizeUpstream,
-				Credential: config.Credential{Passthrough: true},
-				Tenant:     config.Tenant{Argument: "namespace"},
+				Credential:  config.Credential{Passthrough: true},
+				Tenant:      config.Tenant{Argument: "namespace"},
+				TenantCheck: &config.Check{Resource: "dashboards", Verb: "list"},
 			},
 		},
 	}

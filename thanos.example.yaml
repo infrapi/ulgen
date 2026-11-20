@@ -3,7 +3,7 @@ listen: ":8080"
 path: /mcp
 
 kayra:
-  url: https://kayra.example.com       # userinfo, /check, /memberships
+  url: https://kayra.example.com       # userinfo, /check, the caller's namespaces
   cache_ttl: 1m                        # caller resolution cache (/check is never cached)
 
 vault:                                 # tenant credentials (KV v2), AppRole login
@@ -35,3 +35,4 @@ upstreams:
     authorize: upstream
     credential: {passthrough: true}
     tenant: {argument: namespace}
+    tenant_check: {resource: dashboards, verb: list}   # list_tenants: where it is usable

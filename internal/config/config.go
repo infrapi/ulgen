@@ -76,14 +76,18 @@ type Upstream struct {
 	// URL is its Streamable HTTP endpoint.
 	URL string `yaml:"url"`
 	// API is the Kayra api (long name) this upstream is registered as:
-	// the /check api with authorize: thanos, and the filter of
-	// list_tenants.
+	// the /check api, with authorize: thanos and for list_tenants.
 	API string `yaml:"api"`
 	// Version of API, for its OpenAPI document; "v1" when empty.
-	Version    string     `yaml:"version"`
-	Authorize  Authorize  `yaml:"authorize"`
-	Credential Credential `yaml:"credential"`
-	Tenant     Tenant     `yaml:"tenant"`
+	Version   string    `yaml:"version"`
+	Authorize Authorize `yaml:"authorize"`
+	// TenantCheck is what list_tenants asks Kayra's /check to tell whether
+	// this upstream is usable in a tenant. With authorize: thanos it is
+	// resource "tools", verb "get" unless set; with authorize: upstream,
+	// unset lists the upstream in every tenant of the caller.
+	TenantCheck *Check     `yaml:"tenant_check"`
+	Credential  Credential `yaml:"credential"`
+	Tenant      Tenant     `yaml:"tenant"`
 	// ProtocolVersion is the MCP protocol version thanos opens its session
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
@@ -105,6 +109,12 @@ type Credential struct {
 	Header string `yaml:"header"`
 	// Prefix is prepended to the credential, e.g. "Bearer ".
 	Prefix string `yaml:"prefix"`
+}
+
+// Check is one /check question: resource and verb on Upstream.API.
+type Check struct {
+	Resource string `yaml:"resource"`
+	Verb     string `yaml:"verb"`
 }
 
 // VaultSecret locates one tenant's credential. Path may contain {tenant}.
@@ -200,6 +210,12 @@ func (c *Config) Validate() error {
 			if cred.Vault.Mount == "" || cred.Vault.Path == "" || cred.Vault.Key == "" || cred.Header == "" {
 				return fmt.Errorf("%s.credential: vault needs mount, path and key, and header", where)
 			}
+		}
+		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
+			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
+		}
+		if u.Authorize == AuthorizeThanos && u.TenantCheck == nil {
+			u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
 		}
 		if u.Tenant.Inject && u.Tenant.Argument != "" {
 			return fmt.Errorf("%s.tenant: inject and argument are exclusive", where)
