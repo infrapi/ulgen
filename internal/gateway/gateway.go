@@ -12,10 +12,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -157,6 +159,16 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		tok = strings.TrimSpace(tok)
 		if !ok || tok == "" {
+			// The MCP handshake alone, without a token: a gateway's health
+			// check (LiteLLM's opens a session, no user behind it). It
+			// reaches no tool and no upstream.
+			if handshake, err := isHandshake(r); err != nil {
+				http.Error(w, "unreadable request", http.StatusBadRequest)
+				return
+			} else if handshake {
+				mcpHandler.ServeHTTP(w, r)
+				return
+			}
 			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path)
 			unauthorized(w, "a bearer token is required")
 			return
@@ -174,6 +186,38 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		mcpHandler.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tokenKey{}, tok)))
 	})
+}
+
+// handshakeMethods are the JSON-RPC messages served without a token.
+var handshakeMethods = map[string]bool{"initialize": true, "notifications/initialized": true, "ping": true}
+
+// maxHandshakeBody bounds what is read of a request without a token.
+const maxHandshakeBody = 64 << 10
+
+// isHandshake tells whether r is a POST of one handshake message, leaving
+// its body readable again.
+func isHandshake(r *http.Request) (bool, error) {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxHandshakeBody+1))
+	if err != nil {
+		return false, err
+	}
+	if cerr := r.Body.Close(); cerr != nil {
+		return false, cerr
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) > maxHandshakeBody {
+		return false, nil
+	}
+	var msg struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(body, &msg) != nil { // a batch, or not JSON: not a handshake
+		return false, nil
+	}
+	return handshakeMethods[msg.Method], nil
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {

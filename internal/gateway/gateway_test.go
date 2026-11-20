@@ -352,6 +352,29 @@ func TestListTenants(t *testing.T) {
 	}
 }
 
+func TestHandshakeWithoutToken(t *testing.T) {
+	h := newHarness(t)
+	// A health check: a session opens without any token...
+	c := mcp.NewClient(&mcp.Implementation{Name: "health"}, nil)
+	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.thanos.URL + "/mcp/grafana", MaxRetries: -1}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
+	if err != nil {
+		t.Fatalf("handshake without a token: %v", err)
+	}
+	if err := s.Ping(context.Background(), nil); err != nil {
+		t.Errorf("ping without a token: %v", err)
+	}
+	// ...but nothing else.
+	if _, err := s.ListTools(context.Background(), nil); err == nil {
+		t.Errorf("tools/list without a token answered")
+	}
+	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "query_prometheus", Arguments: map[string]any{"tenant": "acme"}}); err == nil {
+		t.Errorf("tools/call without a token answered")
+	}
+	if err := s.Close(); err != nil {
+		t.Logf("close: %v", err)
+	}
+}
+
 func TestCallersMustAuthenticate(t *testing.T) {
 	h := newHarness(t)
 	for _, tok := range []string{"", "forged"} {
@@ -497,11 +520,18 @@ func TestTokenHeader(t *testing.T) {
 			t.Logf("close: %v", err)
 		}
 	}
-	// Authorization is no longer read
+	// Authorization is no longer read: the handshake opens (no token needed), the rest is refused
 	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	if _, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
+	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint: h.thanos.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{"alice-token"}}, MaxRetries: -1,
-	}, nil); err == nil {
+	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if _, err := s.ListTools(context.Background(), nil); err == nil {
 		t.Errorf("Authorization accepted while token_header is X-Kayra-Token")
+	}
+	if err := s.Close(); err != nil {
+		t.Logf("close: %v", err)
 	}
 }
