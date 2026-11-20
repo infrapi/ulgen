@@ -1,20 +1,20 @@
-# thanos, built from source. No configuration inside: mount one at
-# /etc/thanos/thanos.yaml.
+# ulgen, built from source. No configuration inside: mount one at
+# /etc/ulgen/ulgen.yaml.
 #
-#   podman build -t thanos .
-#   podman run -v ./thanos.yaml:/etc/thanos/thanos.yaml:ro,z -p 8080:8080 thanos
+#   podman build -t ulgen .
+#   podman run -v ./ulgen.yaml:/etc/ulgen/ulgen.yaml:ro,z -p 8080:8080 ulgen
 FROM docker.io/library/golang:1.27.3-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /thanos ./cmd/thanos
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /ulgen ./cmd/ulgen
 
 FROM docker.io/library/alpine:3.22
 RUN apk add --no-cache ca-certificates curl \
- && adduser -D -H -u 10001 thanos
-COPY --from=build /thanos /usr/local/bin/thanos
-USER thanos
+ && adduser -D -H -u 10001 ulgen
+COPY --from=build /ulgen /usr/local/bin/ulgen
+USER ulgen
 EXPOSE 8080
-ENTRYPOINT ["thanos"]
-CMD ["-config", "/etc/thanos/thanos.yaml"]
+ENTRYPOINT ["ulgen"]
+CMD ["-config", "/etc/ulgen/ulgen.yaml"]

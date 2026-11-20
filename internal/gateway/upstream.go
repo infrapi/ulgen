@@ -28,8 +28,8 @@ func headersOf(ctx context.Context) http.Header {
 }
 
 // detach returns a context cancelled with parent but carrying none of its
-// values: parent is thanos' own server request, whose values (the
-// protocol version negotiated with thanos' client, for one) must not leak
+// values: parent is ulgen's own server request, whose values (the
+// protocol version negotiated with ulgen's client, for one) must not leak
 // into the upstream client's requests.
 func detach(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,7 +79,7 @@ func newUpstreamClient(url, protocol string, static http.Header, base http.Round
 	return &upstreamClient{
 		url:      url,
 		protocol: protocol,
-		client:   mcp.NewClient(&mcp.Implementation{Name: "thanos", Version: "v1"}, nil),
+		client:   mcp.NewClient(&mcp.Implementation{Name: "ulgen", Version: "v1"}, nil),
 		// Bounds a whole call, streamed response included: long enough for
 		// a heavy Loki or Prometheus query, short enough not to hang.
 		http: &http.Client{Transport: headerTransport{static: static, next: base}, Timeout: callTimeout},

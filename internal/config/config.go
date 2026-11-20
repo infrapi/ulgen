@@ -1,4 +1,4 @@
-// Package config loads thanos' YAML configuration: where it listens, the
+// Package config loads ulgen's YAML configuration: where it listens, the
 // Kayra it asks, the Vault it reads tenant credentials from, and the
 // upstream MCP servers it aggregates. Upstreams are configured one block
 // each, never per tool: their tools are discovered.
@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the root of thanos' configuration file.
+// Config is the root of ulgen's configuration file.
 type Config struct {
 	// Listen is the HTTP listen address, ":8080" when empty.
 	Listen string `yaml:"listen"`
@@ -25,7 +25,7 @@ type Config struct {
 	// MCP servers forward (extra_headers): LiteLLM withholds Authorization
 	// from client-forwarded servers listed together (RFC 9700).
 	TokenHeader string `yaml:"token_header"`
-	// ListTokenFile, optional, holds a Kayra token of thanos' own, re-read
+	// ListTokenFile, optional, holds a Kayra token of ulgen's own, re-read
 	// at each listing: what lists the tools of a passthrough upstream (one
 	// that wants a token for anything, an infrapi/lib MCP) when tools/list
 	// comes without a caller's token — a gateway's UI listing the tools of
@@ -53,7 +53,7 @@ type KayraConfig struct {
 	CacheTTL string `yaml:"cache_ttl"`
 }
 
-// VaultConfig is how thanos logs in to Vault: AppRole.
+// VaultConfig is how ulgen logs in to Vault: AppRole.
 type VaultConfig struct {
 	Address string `yaml:"address"`
 	// RoleIDEnv / SecretIDFile: the AppRole credentials, the role id from
@@ -71,15 +71,15 @@ type VaultConfig struct {
 type Authorize string
 
 const (
-	// AuthorizeThanos: thanos asks Kayra's /check (api = Upstream.API,
+	// AuthorizeUlgen: ulgen asks Kayra's /check (api = Upstream.API,
 	// resource "tools", verb from the tool's annotations) before calling.
-	AuthorizeThanos Authorize = "thanos"
+	AuthorizeUlgen Authorize = "ulgen"
 	// AuthorizeUpstream: the upstream decides itself, with the caller's
 	// own token (credential passthrough), as every infrapi/lib app does.
 	AuthorizeUpstream Authorize = "upstream"
 )
 
-// Upstream is one MCP server thanos aggregates.
+// Upstream is one MCP server ulgen aggregates.
 type Upstream struct {
 	// Name prefixes its tools: "<name>_<tool>". Lowercase letters, digits
 	// and dashes.
@@ -87,19 +87,19 @@ type Upstream struct {
 	// URL is its Streamable HTTP endpoint.
 	URL string `yaml:"url"`
 	// API is the Kayra api (long name) this upstream is registered as:
-	// the /check api, with authorize: thanos and for list_tenants.
+	// the /check api, with authorize: ulgen and for list_tenants.
 	API string `yaml:"api"`
 	// Version of API, for its OpenAPI document; "v1" when empty.
 	Version   string    `yaml:"version"`
 	Authorize Authorize `yaml:"authorize"`
 	// TenantCheck is what list_tenants asks Kayra's /check to tell whether
-	// this upstream is usable in a tenant. With authorize: thanos it is
+	// this upstream is usable in a tenant. With authorize: ulgen it is
 	// resource "tools", verb "get" unless set; with authorize: upstream,
 	// unset lists the upstream in every tenant of the caller.
 	TenantCheck *Check     `yaml:"tenant_check"`
 	Credential  Credential `yaml:"credential"`
 	Tenant      Tenant     `yaml:"tenant"`
-	// ProtocolVersion is the MCP protocol version thanos opens its session
+	// ProtocolVersion is the MCP protocol version ulgen opens its session
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
 	ProtocolVersion string `yaml:"protocol_version"`
@@ -109,7 +109,7 @@ type Upstream struct {
 	HeadersFromEnv map[string]string `yaml:"headers_from_env"`
 }
 
-// Credential says what identifies thanos' calls to an upstream.
+// Credential says what identifies ulgen's calls to an upstream.
 type Credential struct {
 	// Passthrough sends the caller's own bearer token.
 	Passthrough bool `yaml:"passthrough"`
@@ -135,14 +135,14 @@ type VaultSecret struct {
 	Key   string `yaml:"key"`
 }
 
-// Tenant says how a tool names its tenant. Every tool thanos exposes takes
+// Tenant says how a tool names its tenant. Every tool ulgen exposes takes
 // it as a "tenant" argument.
 type Tenant struct {
 	// Inject adds a "tenant" argument to every tool, removed before the
 	// call: the upstream has no notion of tenant, its credential does.
 	Inject bool `yaml:"inject"`
 	// Argument is the upstream's own argument naming the tenant (e.g. an
-	// infrapi/lib MCP's "namespace"): thanos exposes it as "tenant" and
+	// infrapi/lib MCP's "namespace"): ulgen exposes it as "tenant" and
 	// renames it back. A tool without it is not tenant-scoped.
 	Argument string `yaml:"argument"`
 }
@@ -228,19 +228,19 @@ func (c *Config) Validate() error {
 		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
 			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
 		}
-		if u.Authorize == AuthorizeThanos && u.TenantCheck == nil {
+		if u.Authorize == AuthorizeUlgen && u.TenantCheck == nil {
 			u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
 		}
 		if u.Tenant.Inject && u.Tenant.Argument != "" {
 			return fmt.Errorf("%s.tenant: inject and argument are exclusive", where)
 		}
 		switch u.Authorize {
-		case AuthorizeThanos:
+		case AuthorizeUlgen:
 			if u.API == "" {
-				return fmt.Errorf("%s: authorize: thanos needs api, the Kayra api /check is asked about", where)
+				return fmt.Errorf("%s: authorize: ulgen needs api, the Kayra api /check is asked about", where)
 			}
 			if !u.Tenant.Inject && u.Tenant.Argument == "" {
-				return fmt.Errorf("%s: authorize: thanos needs a tenant (inject or argument) to check against", where)
+				return fmt.Errorf("%s: authorize: ulgen needs a tenant (inject or argument) to check against", where)
 			}
 		case AuthorizeUpstream:
 			// An upstream deciding on its own must see who calls.
@@ -248,7 +248,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("%s: authorize: upstream needs credential.passthrough, so the upstream sees the caller", where)
 			}
 		default:
-			return fmt.Errorf("%s.authorize: must be %q or %q", where, AuthorizeThanos, AuthorizeUpstream)
+			return fmt.Errorf("%s.authorize: must be %q or %q", where, AuthorizeUlgen, AuthorizeUpstream)
 		}
 		for header, env := range u.HeadersFromEnv {
 			if os.Getenv(env) == "" {

@@ -11,7 +11,7 @@ import (
 	"github.com/infrapi/lib/pkg/auth"
 )
 
-// Kayra is what thanos asks Kayra: who a token is, whether it may act,
+// Kayra is what ulgen asks Kayra: who a token is, whether it may act,
 // and which namespaces (tenants) it is in.
 type Kayra interface {
 	Verify(ctx context.Context, token string) (*auth.UserInfo, error)

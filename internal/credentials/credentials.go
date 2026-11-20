@@ -14,7 +14,7 @@ import (
 
 	"github.com/infrapi/lib/pkg/vault"
 
-	"github.com/infrapi/thanos/internal/config"
+	"github.com/infrapi/ulgen/internal/config"
 )
 
 // Source returns the credential of tenant for one upstream.
@@ -24,7 +24,7 @@ type Source interface {
 
 // tenantName is what a tenant may look like before it goes into a Vault
 // path: a Kayra namespace name. Anything else (a slash, "..") is refused,
-// so a caller can't make thanos read another path.
+// so a caller can't make ulgen read another path.
 var tenantName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // ValidTenant reports whether tenant may be used in a credential path.

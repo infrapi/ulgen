@@ -7,7 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/infrapi/thanos/internal/config"
+	"github.com/infrapi/ulgen/internal/config"
 )
 
 // tenantArg is the argument every tenant-scoped tool takes, whatever its
@@ -16,7 +16,7 @@ const tenantArg = "tenant"
 
 const tenantDescription = "Tenant to act in (a Kayra namespace). The list_tenants tool gives the ones you belong to."
 
-// tool is one upstream tool as thanos exposes it.
+// tool is one upstream tool as ulgen exposes it.
 type tool struct {
 	upstream *upstream
 	// original is the upstream's own name.
@@ -25,7 +25,7 @@ type tool struct {
 	exposed *mcp.Tool
 	// scoped: the tool takes a tenant.
 	scoped bool
-	// verb is what /check is asked for (authorize: thanos).
+	// verb is what /check is asked for (authorize: ulgen).
 	verb string
 }
 
@@ -90,7 +90,7 @@ func expose(u *upstream, t *mcp.Tool) (*tool, error) {
 		required = append(required, tenantArg)
 		scoped = true
 	}
-	if u.cfg.Authorize == config.AuthorizeThanos && !scoped {
+	if u.cfg.Authorize == config.AuthorizeUlgen && !scoped {
 		return nil, fmt.Errorf("it names no tenant to check")
 	}
 

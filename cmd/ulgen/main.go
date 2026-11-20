@@ -1,6 +1,6 @@
-// Command thanos serves the thanos MCP gateway: see internal/gateway.
+// Command ulgen serves the ulgen MCP gateway: see internal/gateway.
 //
-//	thanos -config /etc/thanos/thanos.yaml
+//	ulgen -config /etc/ulgen/ulgen.yaml
 package main
 
 import (
@@ -18,20 +18,20 @@ import (
 
 	"github.com/infrapi/lib/pkg/auth"
 
-	"github.com/infrapi/thanos/internal/config"
-	"github.com/infrapi/thanos/internal/credentials"
-	"github.com/infrapi/thanos/internal/gateway"
+	"github.com/infrapi/ulgen/internal/config"
+	"github.com/infrapi/ulgen/internal/credentials"
+	"github.com/infrapi/ulgen/internal/gateway"
 )
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("thanos stopped", "error", err)
+		slog.Error("ulgen stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	path := flag.String("config", "thanos.yaml", "configuration file")
+	path := flag.String("config", "ulgen.yaml", "configuration file")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -76,7 +76,7 @@ func run() error {
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("thanos listening", "address", cfg.Listen, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
+		log.Info("ulgen listening", "address", cfg.Listen, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
 		errc <- srv.ListenAndServe()
 	}()
 

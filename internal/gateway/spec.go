@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/infrapi/thanos/internal/config"
+	"github.com/infrapi/ulgen/internal/config"
 )
 
-// SpecHandler serves, for every upstream thanos authorizes itself, the
+// SpecHandler serves, for every upstream ulgen authorizes itself, the
 // OpenAPI document Kayra reads when the api is registered:
 // /apis/<api>/<version>/-/openapi.json. It names no tool: one resource,
 // "tools", whose verbs are what a call needs (see verbOf) — get for a
@@ -19,7 +19,7 @@ import (
 func (g *Gateway) SpecHandler() http.Handler {
 	specs := map[string][]byte{}
 	for _, u := range g.upstreams {
-		if u.cfg.Authorize != config.AuthorizeThanos {
+		if u.cfg.Authorize != config.AuthorizeUlgen {
 			continue
 		}
 		root := "/apis/" + u.cfg.API + "/" + u.cfg.Version
@@ -28,7 +28,7 @@ func (g *Gateway) SpecHandler() http.Handler {
 			"info": map[string]any{
 				"title":       u.cfg.API,
 				"version":     u.cfg.Version,
-				"description": "Tools of the " + u.cfg.Name + " MCP server, through thanos. Authorization only: call them over MCP.",
+				"description": "Tools of the " + u.cfg.Name + " MCP server, through ulgen. Authorization only: call them over MCP.",
 			},
 			"paths": map[string]any{
 				root + "/namespaces/{namespace}/tools/{tool}": map[string]any{

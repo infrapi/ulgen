@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/infrapi/thanos/internal/config"
+	"github.com/infrapi/ulgen/internal/config"
 )
 
 type fakeReader struct {

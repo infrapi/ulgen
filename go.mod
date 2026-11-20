@@ -1,4 +1,4 @@
-module github.com/infrapi/thanos
+module github.com/infrapi/ulgen
 
 go 1.27.3
 

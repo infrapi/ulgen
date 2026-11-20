@@ -1,6 +1,6 @@
-// Package gateway is thanos: one MCP server aggregating several upstream
+// Package gateway is ulgen: one MCP server aggregating several upstream
 // MCP servers, each tool taking a "tenant" (a Kayra namespace). For every
-// call, thanos makes sure the caller may act in that tenant — asking
+// call, ulgen makes sure the caller may act in that tenant — asking
 // Kayra's /check itself, or leaving it to an upstream that asks with the
 // caller's own token — then calls the upstream with the right credential:
 // the caller's token, or the tenant's own credential read from Vault.
@@ -8,7 +8,7 @@
 // Nothing is configured per tool: tools are discovered from the
 // upstreams, the verb /check is asked for comes from each tool's MCP
 // annotations, and which tools a person sees is decided upstream of
-// thanos (LiteLLM's allowed tools).
+// ulgen (LiteLLM's allowed tools).
 package gateway
 
 import (
@@ -30,11 +30,11 @@ import (
 	infraerrors "github.com/infrapi/lib/pkg/errors"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/infrapi/thanos/internal/config"
-	"github.com/infrapi/thanos/internal/credentials"
+	"github.com/infrapi/ulgen/internal/config"
+	"github.com/infrapi/ulgen/internal/credentials"
 )
 
-// listTenantsTool is thanos' own tool.
+// listTenantsTool is ulgen's own tool.
 const listTenantsTool = "list_tenants"
 
 type upstream struct {
@@ -42,7 +42,7 @@ type upstream struct {
 	client *upstreamClient
 }
 
-// Gateway is the thanos MCP server.
+// Gateway is the ulgen MCP server.
 type Gateway struct {
 	cfg       *config.Config
 	kayra     Kayra
@@ -105,15 +105,15 @@ func New(cfg *config.Config, opts Options) (*Gateway, error) {
 		g.upstreams = append(g.upstreams, &upstream{cfg: uc, client: newUpstreamClient(uc.URL, uc.ProtocolVersion, static, opts.Transport, log)})
 	}
 
-	g.servers = map[string]*mcp.Server{"": g.newServer("thanos",
+	g.servers = map[string]*mcp.Server{"": g.newServer("ulgen",
 		"Tools of several services, each prefixed by its service.", g.upstreams)}
 	for _, u := range g.upstreams {
-		g.servers[u.cfg.Name] = g.newServer("thanos-"+u.cfg.Name, "Tools of "+u.cfg.Name+".", []*upstream{u})
+		g.servers[u.cfg.Name] = g.newServer("ulgen-"+u.cfg.Name, "Tools of "+u.cfg.Name+".", []*upstream{u})
 	}
 	return g, nil
 }
 
-// newServer is one MCP server of thanos, with list_tenants over ups.
+// newServer is one MCP server of ulgen, with list_tenants over ups.
 func (g *Gateway) newServer(name, intro string, ups []*upstream) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: name, Version: "v1"}, &mcp.ServerOptions{
 		Instructions: intro + " A tool acting on a tenant takes a `tenant` argument: call " + listTenantsTool +
@@ -223,14 +223,14 @@ func isHandshake(r *http.Request) (bool, error) {
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", `Bearer realm="thanos"`)
+	w.Header().Set("WWW-Authenticate", `Bearer realm="ulgen"`)
 	http.Error(w, msg, http.StatusUnauthorized)
 }
 
 // refreshOnList refreshes the aggregated tools before answering a
 // tools/list, at most every ToolsTTL, and before a tools/call when they
 // were never listed (a gateway in front calls from its own cached list,
-// right after thanos restarted).
+// right after ulgen restarted).
 func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 		switch method {
@@ -248,7 +248,7 @@ func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-// refresh lists every upstream and replaces the tools thanos exposes. An
+// refresh lists every upstream and replaces the tools ulgen exposes. An
 // upstream that fails to list keeps its previous tools.
 func (g *Gateway) refresh(ctx context.Context, force bool) {
 	g.mu.Lock()
@@ -312,7 +312,7 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 	for _, t := range next {
 		g.servers[""].AddTool(t.exposed, g.call(t))
 		if t.original == listTenantsTool {
-			continue // thanos' own on that server; the upstream's stays reachable on the aggregate
+			continue // ulgen's own on that server; the upstream's stays reachable on the aggregate
 		}
 		own := *t.exposed
 		own.Name = t.original
@@ -366,7 +366,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			}
 		}
 
-		if u.cfg.Authorize == config.AuthorizeThanos {
+		if u.cfg.Authorize == config.AuthorizeUlgen {
 			allowed, reason, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{
 				Namespace: tenant, Api: u.cfg.API, Resource: "tools", Verb: t.verb,
 			})
@@ -375,7 +375,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 				if errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500 {
 					return toolError("not allowed on tenant %q: %s", tenant, ie.Message), nil
 				}
-				return nil, fmt.Errorf("thanos: authorization service: %w", err)
+				return nil, fmt.Errorf("ulgen: authorization service: %w", err)
 			}
 			if !allowed {
 				return toolError("not allowed on tenant %q: %s", tenant, reason), nil
@@ -398,7 +398,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 		res, err := u.client.callTool(ctx, headers, t.original, args)
 		if err != nil {
 			g.log.Error("calling an upstream tool", "upstream", u.cfg.Name, "tool", t.original, "error", err)
-			return nil, fmt.Errorf("thanos: %s is unavailable", u.cfg.Name)
+			return nil, fmt.Errorf("ulgen: %s is unavailable", u.cfg.Name)
 		}
 		return res, nil
 	}
@@ -425,7 +425,7 @@ func (g *Gateway) tenants(ctx context.Context, ups []*upstream) (*mcp.CallToolRe
 	namespaces, err := g.kayra.Namespaces(ctx, tok)
 	if err != nil {
 		g.log.Error("listing the caller's namespaces", "error", err)
-		return nil, fmt.Errorf("thanos: could not list your tenants")
+		return nil, fmt.Errorf("ulgen: could not list your tenants")
 	}
 	out := make([]tenantEntry, 0, len(namespaces))
 	for _, ns := range namespaces {
@@ -445,7 +445,7 @@ func (g *Gateway) tenants(ctx context.Context, ups []*upstream) (*mcp.CallToolRe
 				// not subscribed, no role: not usable there
 			default:
 				g.log.Error("checking a tenant", "tenant", ns, "upstream", u.cfg.Name, "error", err)
-				return nil, fmt.Errorf("thanos: could not list your tenants")
+				return nil, fmt.Errorf("ulgen: could not list your tenants")
 			}
 		}
 		if len(services) > 0 {

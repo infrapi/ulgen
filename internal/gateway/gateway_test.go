@@ -18,7 +18,7 @@ import (
 	infraerrors "github.com/infrapi/lib/pkg/errors"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/infrapi/thanos/internal/config"
+	"github.com/infrapi/ulgen/internal/config"
 )
 
 // fakeKayra: alice may read and write in acme, only read in globex; bob
@@ -143,9 +143,9 @@ func telemetryUpstream(t *testing.T) *httptest.Server {
 }
 
 type harness struct {
-	thanos *httptest.Server
-	kayra  *fakeKayra
-	g      *Gateway
+	ulgen *httptest.Server
+	kayra *fakeKayra
+	g     *Gateway
 }
 
 func newHarness(t *testing.T) *harness {
@@ -156,7 +156,7 @@ func newHarness(t *testing.T) *harness {
 		Vault: &config.VaultConfig{Address: "http://vault.invalid", RoleIDEnv: "X", SecretIDFile: "/x"},
 		Upstreams: []config.Upstream{
 			{
-				Name: "grafana", URL: grafanaUpstream(t).URL, API: "grafana.example.io", Authorize: config.AuthorizeThanos,
+				Name: "grafana", URL: grafanaUpstream(t).URL, API: "grafana.example.io", Authorize: config.AuthorizeUlgen,
 				Credential:     config.Credential{Vault: &config.VaultSecret{Mount: "secret", Path: "grafana/{tenant}", Key: "token"}, Header: "X-Grafana-Service-Account-Token"},
 				Tenant:         config.Tenant{Inject: true},
 				HeadersFromEnv: map[string]string{"Authorization": "GRAFANA_BEARER"},
@@ -185,7 +185,7 @@ func newHarness(t *testing.T) *harness {
 	mux.Handle("/apis/", g.SpecHandler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &harness{thanos: srv, kayra: k, g: g}
+	return &harness{ulgen: srv, kayra: k, g: g}
 }
 
 type bearer struct{ token string }
@@ -205,7 +205,7 @@ func (h *harness) sessionAt(t *testing.T, token, path string) *mcp.ClientSession
 	t.Helper()
 	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
 	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: h.thanos.URL + path, HTTPClient: &http.Client{Transport: bearer{token}}, MaxRetries: -1,
+		Endpoint: h.ulgen.URL + path, HTTPClient: &http.Client{Transport: bearer{token}}, MaxRetries: -1,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -332,7 +332,7 @@ func TestTelemetryCallsPassTheCallerThrough(t *testing.T) {
 	n := len(h.kayra.checks)
 	h.kayra.mu.Unlock()
 	if n != 0 {
-		t.Errorf("thanos checked an upstream that authorizes itself")
+		t.Errorf("ulgen checked an upstream that authorizes itself")
 	}
 
 	// Another caller, same shared upstream session: their own token.
@@ -357,7 +357,7 @@ func TestListTenants(t *testing.T) {
 func anonymous(t *testing.T, h *harness, path string) *mcp.ClientSession {
 	t.Helper()
 	c := mcp.NewClient(&mcp.Implementation{Name: "health"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.thanos.URL + path, MaxRetries: -1},
+	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.ulgen.URL + path, MaxRetries: -1},
 		&mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
 	if err != nil {
 		t.Fatalf("handshake without a token: %v", err)
@@ -426,7 +426,7 @@ func TestListTokenFile(t *testing.T) {
 func TestCallersMustAuthenticate(t *testing.T) {
 	h := newHarness(t)
 	for _, tok := range []string{"", "forged"} {
-		req, err := http.NewRequest(http.MethodPost, h.thanos.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tenants"}}`))
+		req, err := http.NewRequest(http.MethodPost, h.ulgen.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tenants"}}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -448,7 +448,7 @@ func TestCallersMustAuthenticate(t *testing.T) {
 
 func TestSpec(t *testing.T) {
 	h := newHarness(t)
-	resp, err := http.Get(h.thanos.URL + "/apis/grafana.example.io/v1/-/openapi.json")
+	resp, err := http.Get(h.ulgen.URL + "/apis/grafana.example.io/v1/-/openapi.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,8 +462,8 @@ func TestSpec(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"/apis/grafana.example.io/v1/namespaces/{namespace}/tools/{tool}"`) {
 		t.Errorf("spec: %d %s", resp.StatusCode, body)
 	}
-	if resp, err := http.Get(h.thanos.URL + "/apis/telemetry.example.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("telemetry authorizes itself, thanos must not serve its spec")
+	if resp, err := http.Get(h.ulgen.URL + "/apis/telemetry.example.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
+		t.Errorf("telemetry authorizes itself, ulgen must not serve its spec")
 	} else if err := resp.Body.Close(); err != nil {
 		t.Errorf("close: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestOneServerPerUpstream(t *testing.T) {
 		t.Errorf("/mcp/telemetry call: %v %s", isErr, out)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, h.thanos.URL+"/mcp/nope", strings.NewReader(`{}`))
+	req, err := http.NewRequest(http.MethodPost, h.ulgen.URL+"/mcp/nope", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestTokenHeader(t *testing.T) {
 	for _, v := range []string{"Bearer alice-token", "alice-token"} {
 		c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
 		s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-			Endpoint: h.thanos.URL + "/mcp/telemetry", HTTPClient: &http.Client{Transport: header{"X-Kayra-Token", v}}, MaxRetries: -1,
+			Endpoint: h.ulgen.URL + "/mcp/telemetry", HTTPClient: &http.Client{Transport: header{"X-Kayra-Token", v}}, MaxRetries: -1,
 		}, nil)
 		if err != nil {
 			t.Fatalf("Connect with X-Kayra-Token %q: %v", v, err)
@@ -571,7 +571,7 @@ func TestTokenHeader(t *testing.T) {
 	// Authorization is no longer read: the handshake opens (no token needed), the rest is refused
 	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
 	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: h.thanos.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{"alice-token"}}, MaxRetries: -1,
+		Endpoint: h.ulgen.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{"alice-token"}}, MaxRetries: -1,
 	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
