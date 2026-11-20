@@ -20,6 +20,11 @@ type Config struct {
 	Listen string `yaml:"listen"`
 	// Path is where the MCP endpoint is served, "/mcp" when empty.
 	Path string `yaml:"path"`
+	// TokenHeader carries the caller's Kayra token, "Authorization" when
+	// empty. Behind LiteLLM, a dedicated header (X-Kayra-Token) that the
+	// MCP servers forward (extra_headers): LiteLLM withholds Authorization
+	// from client-forwarded servers listed together (RFC 9700).
+	TokenHeader string `yaml:"token_header"`
 	// Kayra resolves callers (userinfo), decides (/check) and lists their
 	// tenants (/memberships).
 	Kayra KayraConfig `yaml:"kayra"`
@@ -163,6 +168,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Path == "" {
 		c.Path = "/mcp"
+	}
+	if c.TokenHeader == "" {
+		c.TokenHeader = "Authorization"
 	}
 	if c.Kayra.URL == "" {
 		return fmt.Errorf("kayra.url is required")

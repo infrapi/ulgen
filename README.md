@@ -48,7 +48,9 @@ Nothing is configured per tool:
 - **Which tools a person sees** is not thanos' business: the gateway in
   front decides (LiteLLM's allowed tools).
 
-Every request must carry a bearer token Kayra resolves (`/oauth2/userinfo`,
+Every request must carry a token Kayra resolves, in `token_header` (`Authorization` by default; behind
+LiteLLM, a dedicated `X-Kayra-Token` that its MCP servers forward with `extra_headers`: LiteLLM withholds the
+client's `Authorization` from client-forwarded servers listed together on `/mcp`, RFC 9700), resolved by Kayra (`/oauth2/userinfo`,
 cached `kayra.cache_ttl`); `/check` is never cached.
 
 ## Run

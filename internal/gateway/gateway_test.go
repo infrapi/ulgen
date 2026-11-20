@@ -469,3 +469,39 @@ func TestCallBeforeAnyList(t *testing.T) {
 		t.Errorf("first call without tools/list: %v %s", isErr, out)
 	}
 }
+
+type header struct{ name, value string }
+
+func (h header) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(h.name, h.value)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestTokenHeader(t *testing.T) {
+	h := newHarness(t)
+	h.g.cfg.TokenHeader = "X-Kayra-Token"
+	for _, v := range []string{"Bearer alice-token", "alice-token"} {
+		c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
+		s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
+			Endpoint: h.thanos.URL + "/mcp/telemetry", HTTPClient: &http.Client{Transport: header{"X-Kayra-Token", v}}, MaxRetries: -1,
+		}, nil)
+		if err != nil {
+			t.Fatalf("Connect with X-Kayra-Token %q: %v", v, err)
+		}
+		// passed on to the upstream as Authorization
+		if out, isErr := callText(t, s, "list_dashboards", map[string]any{"tenant": "acme"}); isErr || !strings.Contains(out, "Bearer alice-token") {
+			t.Errorf("%q: %v %s", v, isErr, out)
+		}
+		if err := s.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	}
+	// Authorization is no longer read
+	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
+	if _, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint: h.thanos.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{"alice-token"}}, MaxRetries: -1,
+	}, nil); err == nil {
+		t.Errorf("Authorization accepted while token_header is X-Kayra-Token")
+	}
+}

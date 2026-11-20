@@ -135,7 +135,8 @@ func (g *Gateway) Close() {
 }
 
 // Handler serves MCP (Streamable HTTP, stateless) behind bearer
-// authentication: every request carries a token Kayra resolves. The
+// authentication: every request carries a token Kayra resolves, in
+// token_header (Authorization by default). The
 // configured path serves every upstream, <path>/<upstream> one of them.
 func (g *Gateway) Handler() http.Handler {
 	base := strings.TrimRight(g.cfg.Path, "/")
@@ -149,15 +150,21 @@ func (g *Gateway) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		raw := strings.TrimSpace(r.Header.Get(g.cfg.TokenHeader))
+		tok, ok := strings.CutPrefix(raw, "Bearer ")
+		if !ok && !strings.EqualFold(g.cfg.TokenHeader, "Authorization") {
+			tok, ok = raw, raw != "" // a dedicated header may carry the bare token
+		}
 		tok = strings.TrimSpace(tok)
 		if !ok || tok == "" {
+			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path)
 			unauthorized(w, "a bearer token is required")
 			return
 		}
 		if _, err := g.kayra.Verify(r.Context(), tok); err != nil {
 			var ie *infraerrors.Error
 			if errors.As(err, &ie) && ie.Code == http.StatusUnauthorized {
+				g.log.Warn("refusing a caller: Kayra refused the token", "path", r.URL.Path, "error", err)
 				unauthorized(w, "the token was refused")
 				return
 			}
