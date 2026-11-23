@@ -73,3 +73,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # infrapi/docs (the portal) and infrapi/.github (the org profile) show the
+  # new release: see notify-docs.yml
+  notify:
+    needs: release
+    if: needs.release.outputs.version != ''
+    uses: ./.github/workflows/notify-docs.yml
+    secrets: inherit
