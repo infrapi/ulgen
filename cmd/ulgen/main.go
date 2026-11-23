@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/infrapi/ulgen/internal/config"
 	"github.com/infrapi/ulgen/internal/credentials"
 	"github.com/infrapi/ulgen/internal/gateway"
+	"github.com/infrapi/ulgen/internal/tlsfile"
 )
 
 func main() {
@@ -74,10 +76,19 @@ func run() error {
 	})
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	serve := srv.ListenAndServe
+	if cfg.TLS != nil {
+		certs, err := tlsfile.New(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: certs.GetCertificate}
+		serve = func() error { return srv.ListenAndServeTLS("", "") }
+	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("ulgen listening", "address", cfg.Listen, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
-		errc <- srv.ListenAndServe()
+		log.Info("ulgen listening", "address", cfg.Listen, "tls", cfg.TLS != nil, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
+		errc <- serve()
 	}()
 
 	select {
