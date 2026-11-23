@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -133,11 +134,11 @@ type Upstream struct {
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
 	ProtocolVersion string `yaml:"protocol_version"`
-	// AllowedTools, when set, are the upstream's tools exposed: regular
-	// expressions matching the whole tool name (the upstream's, not
-	// prefixed). Others are neither listed nor callable.
-	AllowedTools []string `yaml:"allowed_tools"`
-	allowed      []*regexp.Regexp
+	// AllowedTools, when set, are the upstream's tools exposed, first match
+	// wins: a regular expression matching the whole tool name (the
+	// upstream's, not prefixed), or a rule with the resource of API its
+	// calls need. Others are neither listed nor callable.
+	AllowedTools []ToolRule `yaml:"allowed_tools"`
 
 	// HeadersFromEnv are static headers sent on every request, valued
 	// from environment variables (header -> variable name): the bearer
@@ -145,18 +146,74 @@ type Upstream struct {
 	HeadersFromEnv map[string]string `yaml:"headers_from_env"`
 }
 
-// ToolAllowed tells whether the upstream's tool name is exposed: every tool
-// without allowed_tools, else one an expression matches whole.
-func (u *Upstream) ToolAllowed(name string) bool {
-	if len(u.AllowedTools) == 0 {
-		return true
+// ToolRule is one entry of allowed_tools: Match, a regular expression on
+// the whole tool name, alone (a plain string) or with, for authorize: ulgen,
+// the Resource of API a matching tool's calls need: the right Kayra's /check
+// is asked, its verb Verb, or the tool's annotations' (get for a read-only
+// tool, create for another write, delete for a destructive one).
+type ToolRule struct {
+	Match    string `yaml:"match"`
+	Resource string `yaml:"resource"`
+	Verb     string `yaml:"verb"`
+	re       *regexp.Regexp
+}
+
+// UnmarshalYAML takes a plain string (Match alone) or a mapping, its keys
+// checked: a misspelt one is an error, as everywhere in the file.
+func (r *ToolRule) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&r.Match)
 	}
-	for _, re := range u.allowed {
-		if re.MatchString(name) {
-			return true
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: an allowed_tools entry is a regular expression or {match, resource, verb}", n.Line)
+	}
+	for i := 0; i < len(n.Content); i += 2 {
+		switch k := n.Content[i].Value; k {
+		case "match", "resource", "verb":
+		default:
+			return fmt.Errorf("line %d: field %s not found in allowed_tools (match, resource, verb)", n.Content[i].Line, k)
 		}
 	}
-	return false
+	type plain ToolRule
+	return n.Decode((*plain)(r))
+}
+
+// ToolRule is the allowed_tools rule exposing the upstream's tool name: nil
+// and true without allowed_tools (every tool), the first rule matching it
+// whole, or false when none does.
+func (u *Upstream) ToolRule(name string) (*ToolRule, bool) {
+	if len(u.AllowedTools) == 0 {
+		return nil, true
+	}
+	for i := range u.AllowedTools {
+		if u.AllowedTools[i].re.MatchString(name) {
+			return &u.AllowedTools[i], true
+		}
+	}
+	return nil, false
+}
+
+// Resources are the resources of API the upstream's calls are checked on,
+// with authorize: ulgen: its rules', and "tools" for a tool no rule names a
+// resource of, unless Check borrows another api's right. Its OpenAPI
+// document declares them.
+func (u *Upstream) Resources() []string {
+	if u.Authorize != AuthorizeUlgen {
+		return nil
+	}
+	var out []string
+	fallback := len(u.AllowedTools) == 0
+	for _, r := range u.AllowedTools {
+		if r.Resource == "" {
+			fallback = true
+		} else if !slices.Contains(out, r.Resource) {
+			out = append(out, r.Resource)
+		}
+	}
+	if fallback && u.Check == nil {
+		out = append(out, "tools")
+	}
+	return out
 }
 
 // Credential says what identifies ulgen's calls to an upstream.
@@ -198,6 +255,7 @@ type Tenant struct {
 }
 
 var upstreamName = regexp.MustCompile(`^[a-z0-9-]+$`)
+var resourceName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 // Load reads and validates the file at path.
 func Load(path string) (*Config, error) {
@@ -281,13 +339,29 @@ func (c *Config) Validate() error {
 		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
 			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
 		}
-		u.allowed = nil
-		for _, expr := range u.AllowedTools {
-			re, err := regexp.Compile("^(?:" + expr + ")$")
-			if err != nil {
-				return fmt.Errorf("%s.allowed_tools: %q: %w", where, expr, err)
+		var firstResource string
+		for j := range u.AllowedTools {
+			r := &u.AllowedTools[j]
+			re, err := regexp.Compile("^(?:" + r.Match + ")$")
+			if err != nil || r.Match == "" {
+				return fmt.Errorf("%s.allowed_tools[%d]: match %q is not a regular expression: %v", where, j, r.Match, err)
 			}
-			u.allowed = append(u.allowed, re)
+			r.re = re
+			if r.Resource == "" && r.Verb != "" {
+				return fmt.Errorf("%s.allowed_tools[%d]: verb without resource", where, j)
+			}
+			if r.Resource == "" {
+				continue
+			}
+			if u.Authorize != AuthorizeUlgen {
+				return fmt.Errorf("%s.allowed_tools[%d]: resource only with authorize: ulgen (an upstream authorizing itself decides alone)", where, j)
+			}
+			if !resourceName.MatchString(r.Resource) {
+				return fmt.Errorf("%s.allowed_tools[%d]: resource %q must be lowercase letters, digits, - and _", where, j, r.Resource)
+			}
+			if firstResource == "" {
+				firstResource = r.Resource
+			}
 		}
 		if u.Check != nil {
 			if u.Authorize != AuthorizeUlgen {
@@ -298,9 +372,13 @@ func (c *Config) Validate() error {
 			}
 		}
 		if u.Authorize == AuthorizeUlgen && u.TenantCheck == nil {
-			u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
-			if u.Check != nil {
+			switch {
+			case u.Check != nil:
 				u.TenantCheck = &Check{Resource: u.Check.Resource, Verb: u.Check.Verb}
+			case firstResource != "":
+				u.TenantCheck = &Check{Resource: firstResource, Verb: "get"}
+			default:
+				u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
 			}
 		}
 		if u.Tenant.Inject && u.Tenant.Argument != "" {

@@ -548,7 +548,7 @@ func TestTokenRequired(t *testing.T) {
 // whole are listed, and the others can't be called.
 func TestAllowedTools(t *testing.T) {
 	h := newHarnessWith(t, func(c *config.Config) {
-		c.Upstreams[0].AllowedTools = []string{"query_.*", "create_fold"}
+		c.Upstreams[0].AllowedTools = []config.ToolRule{{Match: "query_.*"}, {Match: "create_fold"}}
 	})
 	s := h.session(t, "alice-token")
 	names := toolNames(t, s)
@@ -565,6 +565,57 @@ func TestAllowedTools(t *testing.T) {
 	}
 	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "grafana_delete_dashboard", Arguments: map[string]any{"tenant": "acme", "uid": "x"}}); err == nil {
 		t.Errorf("a tool left out by allowed_tools was called")
+	}
+}
+
+// allowed_tools rules with a resource: each call is checked on its rule's
+// resource of the upstream's api, verb from the annotations unless set, and
+// the api's OpenAPI document declares those resources (Kayra validates roles
+// against it).
+func TestToolResources(t *testing.T) {
+	h := newHarnessWith(t, func(c *config.Config) {
+		c.Upstreams[0].API = "mcp.example.io"
+		c.Upstreams[0].AllowedTools = []config.ToolRule{
+			{Match: "query_.*", Resource: "prometheus"},
+			{Match: "delete_dashboard", Resource: "dashboards"},
+			{Match: "create_folder", Resource: "dashboards", Verb: "get"},
+		}
+	})
+	s := h.session(t, "alice-token")
+	callText(t, s, "grafana_query_prometheus", map[string]any{"tenant": "acme", "expr": "up"})
+	callText(t, s, "grafana_delete_dashboard", map[string]any{"tenant": "acme", "uid": "x"})
+	callText(t, s, "grafana_create_folder", map[string]any{"tenant": "acme", "title": "x"})
+	h.kayra.mu.Lock()
+	var got []string
+	for _, c := range h.kayra.checks {
+		if c.Api == "mcp.example.io" && c.Namespace == "acme" {
+			got = append(got, c.Resource+":"+c.Verb)
+		}
+	}
+	h.kayra.mu.Unlock()
+	want := []string{"prometheus:get", "dashboards:delete", "dashboards:get"}
+	if !slices.Equal(got, want) {
+		t.Errorf("checks = %v, want %v (a delete tool needs delete, a verb set overrides)", got, want)
+	}
+
+	resp, err := http.Get(h.ulgen.URL + "/apis/mcp.example.io/v1/-/openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+	for _, p := range []string{"/namespaces/{namespace}/prometheus/{tool}", "/namespaces/{namespace}/dashboards/{tool}"} {
+		if !strings.Contains(string(body), `"/apis/mcp.example.io/v1`+p+`"`) {
+			t.Errorf("spec lacks %s: %s", p, body)
+		}
+	}
+	if strings.Contains(string(body), "/tools/{tool}") {
+		t.Errorf("every rule names a resource: no tools resource expected: %s", body)
 	}
 }
 

@@ -35,6 +35,13 @@ Nothing is configured per tool:
     whoever may list the tenant's dashboards may query its Grafana. One right
     can't tell reads from writes, so only read-only tools are exposed, and
     ulgen serves no OpenAPI document: nothing to register, subscribe or route.
+    Finer, `allowed_tools` rules with a resource: `{match: "query_prometheus.*",
+    resource: prometheus}` checks the calls of the tools it matches on
+    `prometheus` of `api` (verb from the annotations, or the rule's `verb`).
+    The OpenAPI document then declares those resources (and `tools` for a
+    tool no rule names one of; upstreams sharing an api share it), so a role
+    can grant Prometheus and not Loki:
+    `apis: [mcp.example.io], resources: [prometheus], verbs: [get]`.
   - `authorize: upstream`: the upstream checks itself with the caller's
     token, as every infrapi/lib app does.
 - **Credential per call**: the caller's token (`passthrough`), or the
@@ -50,9 +57,10 @@ Nothing is configured per tool:
   gateway and the APIs under one host and make that host Kayra's
   `oauth2.resources`: the token the client gets for the gateway is then good
   for every API behind it.
-- **Which tools are exposed**: `allowed_tools`, per upstream, regular
-  expressions matching the whole tool name (the upstream's own); others are
-  neither listed nor callable. None: every tool.
+- **Which tools are exposed**: `allowed_tools`, per upstream, first match
+  wins: a regular expression matching the whole tool name (the upstream's
+  own), or `{match, resource, verb}` (above). Other tools are neither listed
+  nor callable. None: every tool.
 - **Audit log**: one `tool call` line per call, with the caller (`user`),
   `upstream`, `tool`, `tenant`, `outcome` (`ok`, `refused` by ulgen or Kayra,
   `tool_error` from the upstream, `error`) and `duration_ms`.

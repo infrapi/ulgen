@@ -25,8 +25,9 @@ type tool struct {
 	exposed *mcp.Tool
 	// scoped: the tool takes a tenant.
 	scoped bool
-	// verb is what /check is asked for (authorize: ulgen).
-	verb string
+	// resource and verb are what /check is asked for (authorize: ulgen).
+	resource string
+	verb     string
 }
 
 // verbOf maps a tool's MCP annotations to the Kayra verb its call needs
@@ -50,7 +51,7 @@ func verbOf(t *mcp.Tool) string {
 
 // expose builds the exposed form of an upstream tool, or explains why it
 // can't be exposed.
-func expose(u *upstream, t *mcp.Tool) (*tool, error) {
+func expose(u *upstream, t *mcp.Tool, rule *config.ToolRule) (*tool, error) {
 	schema, err := objectSchema(t.InputSchema)
 	if err != nil {
 		return nil, err
@@ -93,8 +94,20 @@ func expose(u *upstream, t *mcp.Tool) (*tool, error) {
 	if u.cfg.Authorize == config.AuthorizeUlgen && !scoped {
 		return nil, fmt.Errorf("it names no tenant to check")
 	}
-	if u.cfg.Check != nil && verbOf(t) != "get" {
-		return nil, fmt.Errorf("it is not read-only, and check grants every call one right (%s %s)", u.cfg.Check.Verb, u.cfg.Check.Resource)
+	// the right a call needs: the rule's resource, else the borrowed check,
+	// else resource "tools"; the verb from the annotations unless set
+	resource, verb := "tools", verbOf(t)
+	switch {
+	case rule != nil && rule.Resource != "":
+		resource = rule.Resource
+		if rule.Verb != "" {
+			verb = rule.Verb
+		}
+	case u.cfg.Check != nil:
+		if verbOf(t) != "get" {
+			return nil, fmt.Errorf("it is not read-only, and check grants every call one right (%s %s)", u.cfg.Check.Verb, u.cfg.Check.Resource)
+		}
+		resource, verb = u.cfg.Check.Resource, u.cfg.Check.Verb
 	}
 
 	schema["type"] = "object"
@@ -112,7 +125,7 @@ func expose(u *upstream, t *mcp.Tool) (*tool, error) {
 		OutputSchema: t.OutputSchema,
 		Annotations:  t.Annotations,
 	}
-	return &tool{upstream: u, original: t.Name, exposed: exposed, scoped: scoped, verb: verbOf(t)}, nil
+	return &tool{upstream: u, original: t.Name, exposed: exposed, scoped: scoped, resource: resource, verb: verb}, nil
 }
 
 // objectSchema returns a deep copy of an input schema as a JSON object.
