@@ -5,10 +5,9 @@
 // caller's own token — then calls the upstream with the right credential:
 // the caller's token, or the tenant's own credential read from Vault.
 //
-// Nothing is configured per tool: tools are discovered from the
-// upstreams, the verb /check is asked for comes from each tool's MCP
-// annotations, and which tools a person sees is decided upstream of
-// ulgen (LiteLLM's allowed tools).
+// Tools are discovered from the upstreams. allowed_tools decides which are
+// exposed, and the resource /check is asked about per tool family; the verb
+// comes from each tool's MCP annotations unless a rule sets it.
 package gateway
 
 import (
@@ -49,7 +48,7 @@ type Gateway struct {
 	creds     credentials.Source
 	upstreams []*upstream
 	// servers: "" is the aggregate (every upstream, tools "<upstream>_<tool>"), then one per upstream, its
-	// tools under their own names: a gateway in front (LiteLLM) sees one MCP server per service.
+	// tools under their own names: one MCP server per service.
 	servers  map[string]*mcp.Server
 	log      *slog.Logger
 	toolsTTL time.Duration
@@ -252,7 +251,7 @@ func unauthorized(w http.ResponseWriter, resourceMetadata, msg string) {
 
 // refreshOnList refreshes the aggregated tools before answering a
 // tools/list, at most every ToolsTTL, and before a tools/call when they
-// were never listed (a gateway in front calls from its own cached list,
+// were never listed (a client calls from its own cached list,
 // right after ulgen restarted).
 func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
