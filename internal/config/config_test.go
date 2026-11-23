@@ -46,6 +46,14 @@ func TestLoad(t *testing.T) {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 
+	withCheck, err := load(t, strings.Replace(base, "tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards, verb: get}", 1))
+	if err != nil {
+		t.Fatalf("Load with check: %v", err)
+	}
+	if c := withCheck.Upstreams[0].TenantCheck; c == nil || c.Resource != "dashboards" || c.Verb != "get" {
+		t.Errorf("tenant_check must default to check: %+v", c)
+	}
+
 	cases := map[string]struct{ from, to, want string }{
 		"unknown field":             {"tenant: {inject: true}", "tenant: {inject: true}\n    typo: 1", "typo"},
 		"bad name":                  {"name: grafana", "name: Grafana", "lowercase"},
@@ -57,6 +65,8 @@ func TestLoad(t *testing.T) {
 		"no vault":                  {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
 		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
 		"missing env header":        {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
+		"check without verb":        {"tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
+		"check on upstream":         {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
 	}
 	for desc, tc := range cases {
 		content := strings.Replace(base, tc.from, tc.to, 1)

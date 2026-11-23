@@ -93,6 +93,9 @@ func expose(u *upstream, t *mcp.Tool) (*tool, error) {
 	if u.cfg.Authorize == config.AuthorizeUlgen && !scoped {
 		return nil, fmt.Errorf("it names no tenant to check")
 	}
+	if u.cfg.Check != nil && verbOf(t) != "get" {
+		return nil, fmt.Errorf("it is not read-only, and check grants every call one right (%s %s)", u.cfg.Check.Verb, u.cfg.Check.Resource)
+	}
 
 	schema["type"] = "object"
 	schema["properties"] = props

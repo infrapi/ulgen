@@ -19,8 +19,8 @@ import (
 func (g *Gateway) SpecHandler() http.Handler {
 	specs := map[string][]byte{}
 	for _, u := range g.upstreams {
-		if u.cfg.Authorize != config.AuthorizeUlgen {
-			continue
+		if u.cfg.Authorize != config.AuthorizeUlgen || u.cfg.Check != nil {
+			continue // the api serves its own document
 		}
 		root := "/apis/" + u.cfg.API + "/" + u.cfg.Version
 		doc := map[string]any{

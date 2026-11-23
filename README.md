@@ -30,6 +30,13 @@ Nothing is configured per tool:
     OpenAPI document at `/apis/<api>/<version>/-/openapi.json` for Kayra to
     register the api: one resource, `tools`. A namespace role then reads
     `apis: [grafana.example.io], resources: [tools], verbs: [get]`.
+    With `check: {resource, verb}`, every call asks that one right instead,
+    on `api`: for an upstream with no api of its own in Kayra, whose rights
+    are an existing api's. Grafana read through a telemetry api, say:
+    `api: telemetry.example.io`, `check: {resource: dashboards, verb: list}`,
+    whoever may list the tenant's dashboards may query its Grafana. One right
+    can't tell reads from writes, so only read-only tools are exposed, and
+    ulgen serves no OpenAPI document: nothing to register, subscribe or route.
   - `authorize: upstream`: the upstream checks itself with the caller's
     token, as every infrapi/lib app does.
 - **Credential per call**: the caller's token (`passthrough`), or the
@@ -39,7 +46,7 @@ Nothing is configured per tool:
 - **`list_tenants`**: the caller's namespaces (Kayra `GET
   /apis/system.<domain>/v1/namespaces`), each with the upstreams usable there:
   Kayra `/check` on the upstream's `tenant_check` (`tools`/`get` by default
-  with `authorize: ulgen`), every one when it has none.
+  with `authorize: ulgen`, or its `check`), every one when it has none.
 - **Passing the caller's token on**: an infrapi/lib API accepts a Kayra token
   only when its `aud` is the API or a URL the API is under. Publish the MCP
   gateway and the APIs under one host and make that host Kayra's
