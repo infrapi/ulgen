@@ -3,8 +3,8 @@ listen: ":8080"
 path: /mcp
 # a 401's WWW-Authenticate names it (RFC 9728): where MCP clients find the authorization server
 resource_metadata: https://api.example.com/.well-known/oauth-protected-resource/mcp
-# HTTPS: callers' tokens cross the network from the gateway in front. The files
-# are re-read when they change: a renewed certificate needs no restart.
+# HTTPS, for callers' tokens crossing a network. The files are re-read when
+# they change: a renewed certificate needs no restart.
 # tls: {cert_file: /etc/ulgen/tls/cert.pem, key_file: /etc/ulgen/tls/key.pem}
 
 kayra:
@@ -24,7 +24,7 @@ upstreams:
   # org, its token in Vault. ulgen asks Kayra /check before each call.
   - name: grafana
     url: http://mcp-grafana:8000/mcp
-    api: grafana.example.io            # Kayra ApiRegistration served by ulgen's own spec
+    api: mcp.example.io                # Kayra api whose OpenAPI document ulgen serves (its resources: the rules')
     authorize: ulgen
     credential:
       vault: {mount: secret, path: "mcp-gateway/grafana/{tenant}", key: token}

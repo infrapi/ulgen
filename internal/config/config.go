@@ -19,15 +19,14 @@ import (
 type Config struct {
 	// Listen is the HTTP listen address, ":8080" when empty.
 	Listen string `yaml:"listen"`
-	// TLS, when set, serves HTTPS on Listen: callers' tokens cross the
-	// network between the gateway in front and ulgen.
+	// TLS, when set, serves HTTPS on Listen: for callers' tokens crossing
+	// a network.
 	TLS *TLSConfig `yaml:"tls"`
 	// Path is where the MCP endpoint is served, "/mcp" when empty.
 	Path string `yaml:"path"`
 	// TokenHeader carries the caller's Kayra token, "Authorization" when
-	// empty. Behind LiteLLM, a dedicated header (X-Kayra-Token) that the
-	// MCP servers forward (extra_headers): LiteLLM withholds Authorization
-	// from client-forwarded servers listed together (RFC 9700).
+	// empty: a header of its own when a proxy in front passes the token
+	// that way.
 	TokenHeader string `yaml:"token_header"`
 	// ResourceMetadata is the URL of the OAuth protected resource metadata
 	// (RFC 9728) a 401 names in WWW-Authenticate: where an MCP client
@@ -45,7 +44,7 @@ type Config struct {
 	// its servers. Never used to call a tool.
 	ListTokenFile string `yaml:"list_token_file"`
 	// Kayra resolves callers (userinfo), decides (/check) and lists their
-	// tenants (/memberships).
+	// tenants (their namespaces).
 	Kayra KayraConfig `yaml:"kayra"`
 	// Vault holds tenant credentials. Required when an upstream reads one.
 	Vault *VaultConfig `yaml:"vault"`
