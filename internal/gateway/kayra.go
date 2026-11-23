@@ -12,7 +12,7 @@ import (
 )
 
 // Kayra is what ulgen asks Kayra: who a token is, whether it may act,
-// and which namespaces (tenants) it is in.
+// and which namespaces (namespaces) it is in.
 type Kayra interface {
 	Verify(ctx context.Context, token string) (*auth.UserInfo, error)
 	Authorize(ctx context.Context, token string, req auth.AuthorizeRequest) (allowed bool, reason string, err error)

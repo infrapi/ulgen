@@ -11,7 +11,7 @@ kayra:
   url: https://kayra.example.com       # userinfo, /check, the caller's namespaces
   cache_ttl: 1m                        # caller resolution cache (/check is never cached)
 
-vault:                                 # tenant credentials (KV v2), AppRole login
+vault:                                 # namespace credentials (KV v2), AppRole login
   address: https://vault.example.com:8200
   role_id_env: ULGEN_VAULT_ROLE_ID
   secret_id_file: /run/secrets/ulgen-vault-secret-id
@@ -20,16 +20,16 @@ tools_ttl: 5m                          # upstream tools are listed again after t
 credential_ttl: 1m                     # a credential read from Vault is kept this long
 
 upstreams:
-  # mcp-grafana: no notion of tenant; one Grafana service account per tenant
+  # mcp-grafana: no notion of namespace; one Grafana service account per namespace's
   # org, its token in Vault. ulgen asks Kayra /check before each call.
   - name: grafana
     url: http://mcp-grafana:8000/mcp
-    api: mcp.example.io                # Kayra api whose OpenAPI document ulgen serves (its resources: the rules')
+    api: mcp.infrapi.io                # Kayra api whose OpenAPI document ulgen serves (its resources: the rules')
     authorize: ulgen
     credential:
-      vault: {mount: secret, path: "mcp-gateway/grafana/{tenant}", key: token}
+      vault: {mount: secret, path: "mcp-gateway/grafana/{namespace}", key: token}
       header: X-Grafana-Service-Account-Token
-    tenant: {inject: true}
+    namespace: {inject: true}
     # the tools exposed, first match wins: a regular expression on the whole tool name, or a rule
     # with the resource of `api` its calls are checked on (none: every tool, resource "tools")
     allowed_tools:
@@ -40,14 +40,14 @@ upstreams:
       Authorization: MCP_GRAFANA_CALLER_AUTH   # "Bearer <mcp-grafana --server-auth-token>"
     # Or no api of its own: borrow an existing api's right, one for every call
     # (read-only tools only, no spec served, nothing to register):
-    #   api: telemetry.example.io
+    #   api: telemetry.infrapi.io
     #   check: {resource: dashboards, verb: list}
 
   # An infrapi/lib MCP: it checks every call itself with the caller's token.
   - name: telemetry
-    url: https://api.example.com/apis/telemetry.example.io/v1/-/mcp
-    api: telemetry.example.io
+    url: https://api.example.com/apis/telemetry.infrapi.io/v1/-/mcp
+    api: telemetry.infrapi.io
     authorize: upstream
     credential: {passthrough: true}
-    tenant: {argument: namespace}
-    tenant_check: {resource: dashboards, verb: list}   # list_tenants: where it is usable
+    namespace: {argument: namespace}
+    namespace_check: {resource: dashboards, verb: list}   # list_namespaces: where it is usable

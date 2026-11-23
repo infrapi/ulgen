@@ -1,9 +1,9 @@
 // Package gateway is ulgen: one MCP server aggregating several upstream
-// MCP servers, each tool taking a "tenant" (a Kayra namespace). For every
-// call, ulgen makes sure the caller may act in that tenant — asking
+// MCP servers, each tool taking a "namespace", a Kayra namespace. For every
+// call, ulgen makes sure the caller may act in that namespace — asking
 // Kayra's /check itself, or leaving it to an upstream that asks with the
 // caller's own token — then calls the upstream with the right credential:
-// the caller's token, or the tenant's own credential read from Vault.
+// the caller's token, or the namespace's own credential read from Vault.
 //
 // Tools are discovered from the upstreams. allowed_tools decides which are
 // exposed, and the resource /check is asked about per tool family; the verb
@@ -34,8 +34,8 @@ import (
 	"github.com/infrapi/ulgen/internal/metrics"
 )
 
-// listTenantsTool is ulgen's own tool.
-const listTenantsTool = "list_tenants"
+// listNamespacesTool is ulgen's own tool.
+const listNamespacesTool = "list_namespaces"
 
 type upstream struct {
 	cfg    config.Upstream
@@ -130,18 +130,18 @@ func New(cfg *config.Config, opts Options) (*Gateway, error) {
 	return g, nil
 }
 
-// newServer is one MCP server of ulgen, with list_tenants over ups.
+// newServer is one MCP server of ulgen, with list_namespaces over ups.
 func (g *Gateway) newServer(name, intro string, ups []*upstream) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: name, Version: "v1"}, &mcp.ServerOptions{
-		Instructions: intro + " A tool acting on a tenant takes a `tenant` argument: call " + listTenantsTool +
-			" first to know the tenants you belong to, and ask the user which one when there are several.",
+		Instructions: intro + " A tool acting on a namespace takes a `namespace` argument: call " + listNamespacesTool +
+			" first to know the namespaces you belong to, and ask the user which one when there are several.",
 	})
 	srv.AddTool(&mcp.Tool{
-		Name:        listTenantsTool,
-		Description: "List the tenants (Kayra namespaces) you are in, with the services usable in each.",
+		Name:        listNamespacesTool,
+		Description: "List the namespaces (Kayra namespaces) you are in, with the services usable in each.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, g.listTenants(ups))
+	}, g.listNamespaces(ups))
 	srv.AddReceivingMiddleware(g.refreshOnList)
 	return srv
 }
@@ -353,14 +353,14 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 	for name, old := range g.tools {
 		if _, ok := next[name]; !ok {
 			g.servers[""].RemoveTools(name)
-			if old.original != listTenantsTool {
+			if old.original != listNamespacesTool {
 				g.servers[old.upstream.cfg.Name].RemoveTools(old.original)
 			}
 		}
 	}
 	for _, t := range next {
 		g.servers[""].AddTool(t.exposed, g.call(t))
-		if t.original == listTenantsTool {
+		if t.original == listNamespacesTool {
 			continue // ulgen's own on that server; the upstream's stays reachable on the aggregate
 		}
 		own := *t.exposed
@@ -398,7 +398,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 		tok := token(ctx)
 		// the audit log: one line per call, who, where, what, and how it ended
 		start := g.now()
-		tenant := ""
+		namespace := ""
 		reached := false // the upstream answered: an error result is the tool's, not a refusal
 		defer func() {
 			outcome := "ok"
@@ -412,7 +412,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			}
 			elapsed := g.now().Sub(start)
 			g.log.Info("tool call", "user", caller(ctx), "upstream", u.cfg.Name, "tool", t.original,
-				"tenant", tenant, "outcome", outcome, "duration_ms", elapsed.Milliseconds(), "request_id", requestID(ctx))
+				"namespace", namespace, "outcome", outcome, "duration_ms", elapsed.Milliseconds(), "request_id", requestID(ctx))
 			g.metrics.ToolCalls.WithLabelValues(u.cfg.Name, t.original, outcome).Inc()
 			g.metrics.ToolCallDuration.WithLabelValues(u.cfg.Name, outcome).Observe(elapsed.Seconds())
 		}()
@@ -424,29 +424,29 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 		}
 
 		if t.scoped {
-			tenant, _ = args[tenantArg].(string)
-			if !credentials.ValidTenant(tenant) {
-				return toolError("%q is required: the tenant to act in (list_tenants gives yours)", tenantArg), nil
+			namespace, _ = args[namespaceArg].(string)
+			if !credentials.ValidNamespace(namespace) {
+				return toolError("%q is required: the namespace to act in (list_namespaces gives yours)", namespaceArg), nil
 			}
-			delete(args, tenantArg)
-			if u.cfg.Tenant.Argument != "" {
-				args[u.cfg.Tenant.Argument] = tenant
+			delete(args, namespaceArg)
+			if u.cfg.Namespace.Argument != "" {
+				args[u.cfg.Namespace.Argument] = namespace
 			}
 		}
 
 		if u.cfg.Authorize == config.AuthorizeUlgen {
 			allowed, reason, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{
-				Namespace: tenant, Api: u.cfg.API, Resource: t.resource, Verb: t.verb,
+				Namespace: namespace, Api: u.cfg.API, Resource: t.resource, Verb: t.verb,
 			})
 			if err != nil {
 				var ie *infraerrors.Error
 				if errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500 {
-					return toolError("not allowed on tenant %q: %s", tenant, ie.Message), nil
+					return toolError("not allowed on namespace %q: %s", namespace, ie.Message), nil
 				}
 				return nil, fmt.Errorf("ulgen: authorization service: %w", err)
 			}
 			if !allowed {
-				return toolError("not allowed on tenant %q: %s", tenant, reason), nil
+				return toolError("not allowed on namespace %q: %s", namespace, reason), nil
 			}
 		}
 
@@ -455,11 +455,11 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 		case u.cfg.Credential.Passthrough:
 			headers.Set("Authorization", "Bearer "+tok)
 		case u.cfg.Credential.Vault != nil:
-			cred, err := g.creds.Credential(ctx, *u.cfg.Credential.Vault, tenant)
+			cred, err := g.creds.Credential(ctx, *u.cfg.Credential.Vault, namespace)
 			g.metrics.CredentialReads.WithLabelValues(u.cfg.Name, okOrError(err)).Inc()
 			if err != nil {
-				g.log.Error("reading a tenant credential", "upstream", u.cfg.Name, "tenant", tenant, "error", err)
-				return toolError("%s is not set up for tenant %q yet", u.cfg.Name, tenant), nil
+				g.log.Error("reading a namespace credential", "upstream", u.cfg.Name, "namespace", namespace, "error", err)
+				return toolError("%s is not set up for namespace %q yet", u.cfg.Name, namespace), nil
 			}
 			headers.Set(u.cfg.Credential.Header, u.cfg.Credential.Prefix+cred)
 		}
@@ -477,34 +477,34 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 	}
 }
 
-// tenantEntry is one line of list_tenants.
-type tenantEntry struct {
-	Tenant   string   `json:"tenant"`
-	Services []string `json:"services"`
+// namespaceEntry is one line of list_namespaces.
+type namespaceEntry struct {
+	Namespace string   `json:"namespace"`
+	Services  []string `json:"services"`
 }
 
-// listTenants answers list_tenants over ups: the caller's namespaces
+// listNamespaces answers list_namespaces over ups: the caller's namespaces
 // (Kayra), each with the upstreams of ups usable there: those whose
-// tenant_check Kayra's /check allows, and those without one. A namespace
+// namespace_check Kayra's /check allows, and those without one. A namespace
 // where none is usable is left out.
-func (g *Gateway) listTenants(ups []*upstream) mcp.ToolHandler {
+func (g *Gateway) listNamespaces(ups []*upstream) mcp.ToolHandler {
 	return func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return g.tenants(ctx, ups)
+		return g.namespaces(ctx, ups)
 	}
 }
 
-func (g *Gateway) tenants(ctx context.Context, ups []*upstream) (*mcp.CallToolResult, error) {
+func (g *Gateway) namespaces(ctx context.Context, ups []*upstream) (*mcp.CallToolResult, error) {
 	tok := token(ctx)
 	namespaces, err := g.kayra.Namespaces(ctx, tok)
 	if err != nil {
 		g.log.Error("listing the caller's namespaces", "error", err)
-		return nil, fmt.Errorf("ulgen: could not list your tenants")
+		return nil, fmt.Errorf("ulgen: could not list your namespaces")
 	}
-	out := make([]tenantEntry, 0, len(namespaces))
+	out := make([]namespaceEntry, 0, len(namespaces))
 	for _, ns := range namespaces {
 		var services []string
 		for _, u := range ups {
-			chk := u.cfg.TenantCheck
+			chk := u.cfg.NamespaceCheck
 			if chk == nil {
 				services = append(services, u.cfg.Name)
 				continue
@@ -517,23 +517,23 @@ func (g *Gateway) tenants(ctx context.Context, ups []*upstream) (*mcp.CallToolRe
 			case err == nil, errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500:
 				// not subscribed, no role: not usable there
 			default:
-				g.log.Error("checking a tenant", "tenant", ns, "upstream", u.cfg.Name, "error", err)
-				return nil, fmt.Errorf("ulgen: could not list your tenants")
+				g.log.Error("checking a namespace", "namespace", ns, "upstream", u.cfg.Name, "error", err)
+				return nil, fmt.Errorf("ulgen: could not list your namespaces")
 			}
 		}
 		if len(services) > 0 {
 			sort.Strings(services)
-			out = append(out, tenantEntry{Tenant: ns, Services: services})
+			out = append(out, namespaceEntry{Namespace: ns, Services: services})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Tenant < out[j].Tenant })
+	sort.Slice(out, func(i, j int) bool { return out[i].Namespace < out[j].Namespace })
 
-	data, err := json.Marshal(map[string]any{"tenants": out})
+	data, err := json.Marshal(map[string]any{"namespaces": out})
 	if err != nil {
 		return nil, err
 	}
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: string(data)}},
-		StructuredContent: map[string]any{"tenants": out},
+		StructuredContent: map[string]any{"namespaces": out},
 	}, nil
 }

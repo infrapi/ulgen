@@ -14,16 +14,16 @@ vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /
 upstreams:
   - name: grafana
     url: http://mcp-grafana:8000/mcp
-    api: grafana.example.io
+    api: grafana.infrapi.io
     authorize: ulgen
-    credential: {vault: {mount: secret, path: "grafana/{tenant}", key: token}, header: X-Grafana-Service-Account-Token}
-    tenant: {inject: true}
+    credential: {vault: {mount: secret, path: "grafana/{namespace}", key: token}, header: X-Grafana-Service-Account-Token}
+    namespace: {inject: true}
   - name: telemetry
-    url: https://api.example.com/apis/telemetry.example.io/v1/-/mcp
-    api: telemetry.example.io
+    url: https://api.example.com/apis/telemetry.infrapi.io/v1/-/mcp
+    api: telemetry.infrapi.io
     authorize: upstream
     credential: {passthrough: true}
-    tenant: {argument: namespace}
+    namespace: {argument: namespace}
 `
 
 func load(t *testing.T, content string) (*Config, error) {
@@ -40,14 +40,14 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c := cfg.Upstreams[0].TenantCheck; c == nil || c.Resource != "tools" || c.Verb != "get" || cfg.Upstreams[1].TenantCheck != nil {
-		t.Errorf("tenant_check defaults: %+v %+v", cfg.Upstreams[0].TenantCheck, cfg.Upstreams[1].TenantCheck)
+	if c := cfg.Upstreams[0].NamespaceCheck; c == nil || c.Resource != "tools" || c.Verb != "get" || cfg.Upstreams[1].NamespaceCheck != nil {
+		t.Errorf("namespace_check defaults: %+v %+v", cfg.Upstreams[0].NamespaceCheck, cfg.Upstreams[1].NamespaceCheck)
 	}
 	if cfg.Listen != ":8080" || cfg.Path != "/mcp" || cfg.Upstreams[0].Version != "v1" || cfg.Upstreams[0].ProtocolVersion != "2025-06-18" {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 
-	withRules, err := load(t, strings.Replace(base, "tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [\"search_.*\", {match: \"query_.*\", resource: prometheus}, {match: \"get_.*\", resource: dashboards, verb: get}]", 1))
+	withRules, err := load(t, strings.Replace(base, "namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [\"search_.*\", {match: \"query_.*\", resource: prometheus}, {match: \"get_.*\", resource: dashboards, verb: get}]", 1))
 	if err != nil {
 		t.Fatalf("Load with rules: %v", err)
 	}
@@ -61,40 +61,40 @@ func TestLoad(t *testing.T) {
 	if _, ok := g.ToolRule("delete_dashboard"); ok {
 		t.Errorf("delete_dashboard matches no rule: not exposed")
 	}
-	if c := g.TenantCheck; c == nil || c.Resource != "prometheus" || c.Verb != "get" {
-		t.Errorf("tenant_check must default to the first rule's resource: %+v", c)
+	if c := g.NamespaceCheck; c == nil || c.Resource != "prometheus" || c.Verb != "get" {
+		t.Errorf("namespace_check must default to the first rule's resource: %+v", c)
 	}
 	if res := g.Resources(); !slices.Equal(res, []string{"prometheus", "dashboards", "tools"}) {
 		t.Errorf("resources = %v", res)
 	}
 
-	withCheck, err := load(t, strings.Replace(base, "tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards, verb: get}", 1))
+	withCheck, err := load(t, strings.Replace(base, "namespace: {inject: true}", "namespace: {inject: true}\n    check: {resource: dashboards, verb: get}", 1))
 	if err != nil {
 		t.Fatalf("Load with check: %v", err)
 	}
-	if c := withCheck.Upstreams[0].TenantCheck; c == nil || c.Resource != "dashboards" || c.Verb != "get" {
-		t.Errorf("tenant_check must default to check: %+v", c)
+	if c := withCheck.Upstreams[0].NamespaceCheck; c == nil || c.Resource != "dashboards" || c.Verb != "get" {
+		t.Errorf("namespace_check must default to check: %+v", c)
 	}
 
 	cases := map[string]struct{ from, to, want string }{
-		"unknown field":             {"tenant: {inject: true}", "tenant: {inject: true}\n    typo: 1", "typo"},
-		"bad name":                  {"name: grafana", "name: Grafana", "lowercase"},
-		"duplicate":                 {"name: telemetry", "name: grafana", "duplicated"},
-		"ulgen without api":         {"api: grafana.example.io", "api: \"\"", "needs api"},
-		"upstream needs caller":     {"credential: {passthrough: true}", "credential: {vault: {mount: s, path: p, key: k}, header: H}", "passthrough"},
-		"both credentials":          {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
-		"bad authorize":             {"authorize: upstream", "authorize: nobody", "authorize"},
-		"no vault":                  {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
-		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
-		"missing env header":        {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
-		"tls without key":           {"kayra: {url: https://kayra.example.com}", "kayra: {url: https://kayra.example.com}\ntls: {cert_file: /etc/ulgen/cert.pem}", "tls: cert_file and key_file"},
-		"allowed_tools typo":        {"tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [{match: x, resouce: y}]", "resouce"},
-		"verb without resource":     {"tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [{match: x, verb: get}]", "verb without resource"},
-		"resource on upstream":      {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    allowed_tools: [{match: x, resource: y}]", "only with authorize: ulgen"},
-		"bad resource name":         {"tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [{match: x, resource: Prom}]", "lowercase"},
-		"bad allowed_tools":         {"tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [\"query_(\"]", "allowed_tools"},
-		"check without verb":        {"tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
-		"check on upstream":         {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
+		"unknown field":                {"namespace: {inject: true}", "namespace: {inject: true}\n    typo: 1", "typo"},
+		"bad name":                     {"name: grafana", "name: Grafana", "lowercase"},
+		"duplicate":                    {"name: telemetry", "name: grafana", "duplicated"},
+		"ulgen without api":            {"api: grafana.infrapi.io", "api: \"\"", "needs api"},
+		"upstream needs caller":        {"credential: {passthrough: true}", "credential: {vault: {mount: s, path: p, key: k}, header: H}", "passthrough"},
+		"both credentials":             {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
+		"bad authorize":                {"authorize: upstream", "authorize: nobody", "authorize"},
+		"no vault":                     {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
+		"namespace_check without verb": {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    namespace_check: {resource: dashboards}", "namespace_check"},
+		"missing env header":           {"namespace: {inject: true}", "namespace: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
+		"tls without key":              {"kayra: {url: https://kayra.example.com}", "kayra: {url: https://kayra.example.com}\ntls: {cert_file: /etc/ulgen/cert.pem}", "tls: cert_file and key_file"},
+		"allowed_tools typo":           {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, resouce: y}]", "resouce"},
+		"verb without resource":        {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, verb: get}]", "verb without resource"},
+		"resource on upstream":         {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    allowed_tools: [{match: x, resource: y}]", "only with authorize: ulgen"},
+		"bad resource name":            {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, resource: Prom}]", "lowercase"},
+		"bad allowed_tools":            {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [\"query_(\"]", "allowed_tools"},
+		"check without verb":           {"namespace: {inject: true}", "namespace: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
+		"check on upstream":            {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
 	}
 	for desc, tc := range cases {
 		content := strings.Replace(base, tc.from, tc.to, 1)

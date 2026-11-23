@@ -1,10 +1,10 @@
 ---
-title: Tools and tenants
-description: The MCP endpoints, how upstream tools are discovered and filtered with allowed_tools, and how every tool gets a tenant argument.
+title: Tools and namespaces
+description: The MCP endpoints, how upstream tools are discovered and filtered with allowed_tools, and how every tool gets a namespace argument.
 weight: 30
 ---
 
-# Tools and tenants
+# Tools and namespaces
 
 ## Endpoints
 
@@ -16,7 +16,7 @@ weight: 30
 | `/metrics` | Prometheus metrics ([Audit log and metrics](observability.md)) |
 | `/healthz` | liveness |
 
-Each MCP endpoint also has a `list_tenants` tool.
+Each MCP endpoint also has a `list_namespaces` tool.
 
 The MCP endpoints use Streamable HTTP. ulgen opens its own sessions to the
 upstreams with MCP protocol `2025-06-18` by default (`protocol_version`),
@@ -50,30 +50,30 @@ allowed_tools:
 
 An invalid expression, or a key that does not exist, fails ulgen's start.
 
-## Tenants
+## Namespaces
 
-Every tool ulgen exposes takes a required `tenant` argument, a Kayra
-namespace. Each upstream says how it names its tenant:
+Every tool ulgen exposes takes a required `namespace` argument, a Kayra
+namespace. Each upstream says how it names its namespace:
 
-- `tenant: {inject: true}`: the upstream has no notion of tenant, and its
-  credential sets the tenant (a tenant's Grafana service account). ulgen
-  adds `tenant` to every tool and removes it before the call.
-- `tenant: {argument: namespace}`: the upstream already takes the tenant as
+- `namespace: {inject: true}`: the upstream has no notion of namespace, and its
+  credential sets the namespace (a namespace's Grafana service account). ulgen
+  adds `namespace` to every tool and removes it before the call.
+- `namespace: {argument: namespace}`: the upstream already takes the namespace as
   an argument of its own, as an infrapi/lib MCP's `namespace` does. ulgen
-  exposes it as `tenant` and renames it back for the call. A tool without
-  that argument is not tenant-scoped, and stays as it is.
+  exposes it as `namespace` and renames it back for the call. A tool without
+  that argument is not namespace-scoped, and stays as it is.
 
-## list_tenants
+## list_namespaces
 
-`list_tenants` answers the caller's namespaces, read from Kayra
+`list_namespaces` answers the caller's namespaces, read from Kayra
 (`GET /apis/system.<domain>/v1/namespaces`). Each comes with the upstreams
-usable there, decided by Kayra's `/check` on the upstream's `tenant_check`.
+usable there, decided by Kayra's `/check` on the upstream's `namespace_check`.
 
-The default `tenant_check`, with `authorize: ulgen`:
+The default `namespace_check`, with `authorize: ulgen`:
 
 1. `check`, when set;
 2. otherwise, the first rule's resource with `get`;
 3. otherwise, `tools`/`get`.
 
-An upstream without a `tenant_check`, one with `authorize: upstream` and
+An upstream without a `namespace_check`, one with `authorize: upstream` and
 none set, is listed in every namespace.

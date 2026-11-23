@@ -28,7 +28,7 @@ func TestVaultCredential(t *testing.T) {
 	v := NewVault(r, time.Minute)
 	now := time.Unix(1000, 0)
 	v.now = func() time.Time { return now }
-	secret := config.VaultSecret{Mount: "secret", Path: "grafana/{tenant}", Key: "token"}
+	secret := config.VaultSecret{Mount: "secret", Path: "grafana/{namespace}", Key: "token"}
 
 	for i := 0; i < 3; i++ {
 		got, err := v.Credential(context.Background(), secret, "acme")
@@ -44,9 +44,9 @@ func TestVaultCredential(t *testing.T) {
 		t.Errorf("expired cache: reads = %d, err %v", r.reads, err)
 	}
 
-	for _, tenant := range []string{"globex", "empty", "../acme", "acme/x", "", "ACME", "-acme"} {
-		if _, err := v.Credential(context.Background(), secret, tenant); err == nil {
-			t.Errorf("tenant %q: no error", tenant)
+	for _, namespace := range []string{"globex", "empty", "../acme", "acme/x", "", "ACME", "-acme"} {
+		if _, err := v.Credential(context.Background(), secret, namespace); err == nil {
+			t.Errorf("namespace %q: no error", namespace)
 		}
 	}
 }

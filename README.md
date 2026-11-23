@@ -1,14 +1,14 @@
 # ulgen
 
 One MCP server in front of several, for multi-tenant use: every tool takes a
-`tenant` (a [Kayra](https://github.com/infrapi/kayra) namespace), and ulgen
+`namespace` (a [Kayra](https://github.com/infrapi/kayra) namespace), and ulgen
 makes sure the caller may act there before calling the upstream with the
 right credential.
 
-Documentation: [infrapi.io/products/ulgen](https://infrapi.io/products/ulgen/), from [`docs/`](docs/index.md).
+Documentation: [infrapi.github.io/products/ulgen](https://infrapi.github.io/products/ulgen/docs/), from [`docs/`](docs/index.md).
 
 ```
-MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (tenant credential from Vault)
+MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (namespace credential from Vault)
                                                       └─► telemetry MCP (caller's token)
 ```
 
@@ -21,25 +21,25 @@ Endpoints:
 - `/metrics`: Prometheus metrics (below);
 - `/healthz`.
 
-Each MCP endpoint also has `list_tenants`.
+Each MCP endpoint also has `list_namespaces`.
 
 ## Tools
 
 Tools are discovered from each upstream (`tools/list`, refreshed every `tools_ttl`) and exposed with a
-required `tenant` argument: added by ulgen (`tenant.inject`), or the upstream's own one renamed
-(`tenant.argument`, e.g. an infrapi/lib MCP's `namespace`).
+required `namespace` argument: added by ulgen (`namespace.inject`), or the upstream's own one renamed
+(`namespace.argument`, e.g. an infrapi/lib MCP's `namespace`).
 
 `allowed_tools` decides which of an upstream's tools are exposed, first match wins. An entry is a regular
 expression matching the whole tool name (the upstream's own, not prefixed), or `{match, resource, verb}`,
 which also names the right the tool's calls need (below). A tool no entry matches is neither listed nor
 callable; without `allowed_tools`, every tool is exposed.
 
-## Authorization per tenant
+## Authorization per namespace
 
 Each upstream is one of:
 
 - `authorize: ulgen`: before each call, ulgen asks Kayra `POST .../check` with the caller's token,
-  `{namespace: <tenant>, api: <upstream api>, resource, verb}`:
+  `{namespace: <namespace>, api: <upstream api>, resource, verb}`:
   - `resource` is the matching `allowed_tools` rule's, else `tools`;
   - `verb` is the rule's, else the tool's MCP annotations': `get` for a read-only tool, `delete` for a
     destructive one (or one without annotations), `create` for any other write.
@@ -52,25 +52,25 @@ Each upstream is one of:
   allowed_tools:
     - {match: "query_prometheus.*|list_prometheus_.*", resource: prometheus}
     - {match: "query_loki.*|list_loki_.*", resource: loki}
-  # a role: apis: [mcp.example.io], resources: [prometheus], verbs: [get]
+  # a role: apis: [mcp.infrapi.io], resources: [prometheus], verbs: [get]
   ```
 
   With `check: {resource, verb}`, every call of a tool no rule names a resource of asks that one right
   instead: for an upstream whose rights are an existing api's (Grafana read through a telemetry api:
-  `api: telemetry.example.io`, `check: {resource: dashboards, verb: list}`). One right can't tell reads
+  `api: telemetry.infrapi.io`, `check: {resource: dashboards, verb: list}`). One right can't tell reads
   from writes, so only read-only tools are exposed that way, and ulgen serves no document for that api.
 - `authorize: upstream`: the upstream checks itself with the caller's token, as every infrapi/lib app
   does.
 
-`list_tenants` answers the caller's namespaces (Kayra `GET /apis/system.<domain>/v1/namespaces`), each with
-the upstreams usable there: Kayra `/check` on the upstream's `tenant_check`. Its default, with
+`list_namespaces` answers the caller's namespaces (Kayra `GET /apis/system.<domain>/v1/namespaces`), each with
+the upstreams usable there: Kayra `/check` on the upstream's `namespace_check`. Its default, with
 `authorize: ulgen`: `check`, else the first rule's resource with `get`, else `tools`/`get`. An upstream
-without a `tenant_check` is listed in every namespace.
+without a `namespace_check` is listed in every namespace.
 
 ## Credentials
 
-Per call: the caller's token (`credential.passthrough`), or the tenant's own credential read from Vault
-(`credential.vault`, AppRole login, path with `{tenant}`, sent in `credential.header`). A Vault-credential
+Per call: the caller's token (`credential.passthrough`), or the namespace's own credential read from Vault
+(`credential.vault`, AppRole login, path with `{namespace}`, sent in `credential.header`). A Vault-credential
 upstream never sees the caller's token.
 
 An infrapi/lib API accepts a Kayra token only when its `aud` is the API or a URL the API is under. Serve
@@ -93,7 +93,7 @@ pass the token in a header of its own: `token_header`.
 ## Audit log and metrics
 
 One `tool call` line per call, in the JSON log on stderr: the caller (`user`), `upstream`, `tool`,
-`tenant`, `outcome` (`ok`; `refused` by ulgen or Kayra; `tool_error`, an error result of the upstream's;
+`namespace`, `outcome` (`ok`; `refused` by ulgen or Kayra; `tool_error`, an error result of the upstream's;
 `error`, the upstream or Kayra unreachable), `duration_ms` and `request_id`.
 
 `request_id` is the request's `X-Request-Id`, as a proxy in front sets it; ulgen passes it on to the

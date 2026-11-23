@@ -1,5 +1,5 @@
 // Package config loads ulgen's YAML configuration: where it listens, the
-// Kayra it asks, the Vault it reads tenant credentials from, and the
+// Kayra it asks, the Vault it reads namespace credentials from, and the
 // upstream MCP servers it aggregates. Upstreams are configured one block
 // each, never per tool: their tools are discovered.
 package config
@@ -44,9 +44,9 @@ type Config struct {
 	// its servers. Never used to call a tool.
 	ListTokenFile string `yaml:"list_token_file"`
 	// Kayra resolves callers (userinfo), decides (/check) and lists their
-	// tenants (their namespaces).
+	// namespaces.
 	Kayra KayraConfig `yaml:"kayra"`
-	// Vault holds tenant credentials. Required when an upstream reads one.
+	// Vault holds namespace credentials. Required when an upstream reads one.
 	Vault *VaultConfig `yaml:"vault"`
 	// ToolsTTL is how long the aggregated tool list is kept before the
 	// upstreams are listed again, a Go duration, 5m when empty.
@@ -86,7 +86,7 @@ type VaultConfig struct {
 }
 
 // Authorize says who decides whether a caller may call an upstream's tool
-// on a tenant.
+// on a namespace.
 type Authorize string
 
 const (
@@ -106,29 +106,29 @@ type Upstream struct {
 	// URL is its Streamable HTTP endpoint.
 	URL string `yaml:"url"`
 	// API is the Kayra api (long name) /check is asked about, with
-	// authorize: ulgen and for list_tenants: the api this upstream is
+	// authorize: ulgen and for list_namespaces: the api this upstream is
 	// registered as, or, with Check, an existing api whose rights it
 	// borrows.
 	API string `yaml:"api"`
 	// Version of API, for its OpenAPI document; "v1" when empty.
 	Version   string    `yaml:"version"`
 	Authorize Authorize `yaml:"authorize"`
-	// TenantCheck is what list_tenants asks Kayra's /check to tell whether
-	// this upstream is usable in a tenant. With authorize: ulgen it is
+	// NamespaceCheck is what list_namespaces asks Kayra's /check to tell whether
+	// this upstream is usable in a namespace. With authorize: ulgen it is
 	// resource "tools", verb "get" unless set; with authorize: upstream,
-	// unset lists the upstream in every tenant of the caller.
-	TenantCheck *Check `yaml:"tenant_check"`
+	// unset lists the upstream in every namespace of the caller.
+	NamespaceCheck *Check `yaml:"namespace_check"`
 	// Check, with authorize: ulgen, is the one right every call needs:
 	// resource and verb on API, instead of resource "tools" and a verb
 	// from the tool's annotations. For an upstream with no api of its own
 	// in Kayra, whose rights are another api's (Grafana's read tools on a
 	// telemetry api's dashboards: list). One right can't tell reads from
 	// writes, so only the upstream's read-only tools are exposed. It is
-	// also the default TenantCheck, and ulgen serves no OpenAPI document
+	// also the default NamespaceCheck, and ulgen serves no OpenAPI document
 	// for API: the api serves its own.
 	Check      *Check     `yaml:"check"`
 	Credential Credential `yaml:"credential"`
-	Tenant     Tenant     `yaml:"tenant"`
+	Namespace  Namespace  `yaml:"namespace"`
 	// ProtocolVersion is the MCP protocol version ulgen opens its session
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
@@ -219,7 +219,7 @@ func (u *Upstream) Resources() []string {
 type Credential struct {
 	// Passthrough sends the caller's own bearer token.
 	Passthrough bool `yaml:"passthrough"`
-	// Vault reads the tenant's credential from Vault (KV v2).
+	// Vault reads the namespace's credential from Vault (KV v2).
 	Vault *VaultSecret `yaml:"vault"`
 	// Header carries the Vault credential, e.g.
 	// X-Grafana-Service-Account-Token.
@@ -234,22 +234,22 @@ type Check struct {
 	Verb     string `yaml:"verb"`
 }
 
-// VaultSecret locates one tenant's credential. Path may contain {tenant}.
+// VaultSecret locates one namespace's credential. Path may contain {namespace}.
 type VaultSecret struct {
 	Mount string `yaml:"mount"`
 	Path  string `yaml:"path"`
 	Key   string `yaml:"key"`
 }
 
-// Tenant says how a tool names its tenant. Every tool ulgen exposes takes
-// it as a "tenant" argument.
-type Tenant struct {
-	// Inject adds a "tenant" argument to every tool, removed before the
-	// call: the upstream has no notion of tenant, its credential does.
+// Namespace says how a tool names its namespace. Every tool ulgen exposes takes
+// it as a "namespace" argument.
+type Namespace struct {
+	// Inject adds a "namespace" argument to every tool, removed before the
+	// call: the upstream has no notion of namespace, its credential does.
 	Inject bool `yaml:"inject"`
-	// Argument is the upstream's own argument naming the tenant (e.g. an
-	// infrapi/lib MCP's "namespace"): ulgen exposes it as "tenant" and
-	// renames it back. A tool without it is not tenant-scoped.
+	// Argument is the upstream's own argument naming the namespace (e.g. an
+	// infrapi/lib MCP's "namespace"): ulgen exposes it as "namespace" and
+	// renames it back. A tool without it is not namespace-scoped.
 	Argument string `yaml:"argument"`
 }
 
@@ -258,7 +258,7 @@ var resourceName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 // Load reads and validates the file at path.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //#nosec G304 -- the configuration file the operator names
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
@@ -335,8 +335,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("%s.credential: vault needs mount, path and key, and header", where)
 			}
 		}
-		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
-			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
+		if u.NamespaceCheck != nil && (u.NamespaceCheck.Resource == "" || u.NamespaceCheck.Verb == "" || u.API == "") {
+			return fmt.Errorf("%s.namespace_check: needs resource, verb and the upstream's api", where)
 		}
 		var firstResource string
 		for j := range u.AllowedTools {
@@ -370,26 +370,26 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("%s.check: needs resource and verb", where)
 			}
 		}
-		if u.Authorize == AuthorizeUlgen && u.TenantCheck == nil {
+		if u.Authorize == AuthorizeUlgen && u.NamespaceCheck == nil {
 			switch {
 			case u.Check != nil:
-				u.TenantCheck = &Check{Resource: u.Check.Resource, Verb: u.Check.Verb}
+				u.NamespaceCheck = &Check{Resource: u.Check.Resource, Verb: u.Check.Verb}
 			case firstResource != "":
-				u.TenantCheck = &Check{Resource: firstResource, Verb: "get"}
+				u.NamespaceCheck = &Check{Resource: firstResource, Verb: "get"}
 			default:
-				u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
+				u.NamespaceCheck = &Check{Resource: "tools", Verb: "get"}
 			}
 		}
-		if u.Tenant.Inject && u.Tenant.Argument != "" {
-			return fmt.Errorf("%s.tenant: inject and argument are exclusive", where)
+		if u.Namespace.Inject && u.Namespace.Argument != "" {
+			return fmt.Errorf("%s.namespace: inject and argument are exclusive", where)
 		}
 		switch u.Authorize {
 		case AuthorizeUlgen:
 			if u.API == "" {
 				return fmt.Errorf("%s: authorize: ulgen needs api, the Kayra api /check is asked about", where)
 			}
-			if !u.Tenant.Inject && u.Tenant.Argument == "" {
-				return fmt.Errorf("%s: authorize: ulgen needs a tenant (inject or argument) to check against", where)
+			if !u.Namespace.Inject && u.Namespace.Argument == "" {
+				return fmt.Errorf("%s: authorize: ulgen needs a namespace (inject or argument) to check against", where)
 			}
 		case AuthorizeUpstream:
 			// An upstream deciding on its own must see who calls.

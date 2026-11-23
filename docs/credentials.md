@@ -1,6 +1,6 @@
 ---
 title: Credentials
-description: What identifies ulgen's calls to an upstream, the caller's own token or the tenant's credential read from Vault, and static headers.
+description: What identifies ulgen's calls to an upstream, the caller's own token or the namespace's credential read from Vault, and static headers.
 weight: 50
 ---
 
@@ -19,23 +19,23 @@ itself (`authorize: upstream`), such as an infrapi/lib MCP. The token's
 audience must be good for the upstream: see
 [One token for every API](callers.md#one-token-for-every-api).
 
-## The tenant's credential, from Vault
+## The namespace's credential, from Vault
 
 ```yaml
 credential:
-  vault: {mount: secret, path: "grafana/{tenant}", key: token}
+  vault: {mount: secret, path: "grafana/{namespace}", key: token}
   header: X-Grafana-Service-Account-Token
   # prefix: "Bearer "               # prepended to the value
 ```
 
-This is for an upstream with no notion of tenant, where each tenant has its
-own credential: a Grafana service account per tenant organisation, for
-instance. ulgen reads the KV v2 secret at `path`, with `{tenant}` replaced
-by the call's tenant. It sends the value of `key` in `header`, after
+This is for an upstream with no notion of namespace, where each namespace has its
+own credential: a Grafana service account per namespace's organisation, for
+instance. ulgen reads the KV v2 secret at `path`, with `{namespace}` replaced
+by the call's namespace. It sends the value of `key` in `header`, after
 `prefix`. The value is kept for `credential_ttl` (1 minute by default).
 
 A Vault-credential upstream never sees the caller's token. Before each call,
-ulgen checks the caller's right on the tenant with Kayra
+ulgen checks the caller's right on the namespace with Kayra
 (`authorize: ulgen`).
 
 ulgen logs in to Vault with an AppRole:

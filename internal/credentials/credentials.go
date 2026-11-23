@@ -1,4 +1,4 @@
-// Package credentials reads a tenant's upstream credential from Vault
+// Package credentials reads a namespace's upstream credential from Vault
 // (KV v2), with a short in-memory cache so a burst of tool calls doesn't
 // read the same secret every time.
 package credentials
@@ -17,19 +17,19 @@ import (
 	"github.com/infrapi/ulgen/internal/config"
 )
 
-// Source returns the credential of tenant for one upstream.
+// Source returns the credential of namespace for one upstream.
 type Source interface {
-	Credential(ctx context.Context, secret config.VaultSecret, tenant string) (string, error)
+	Credential(ctx context.Context, secret config.VaultSecret, namespace string) (string, error)
 }
 
-// tenantName is what a tenant may look like before it goes into a Vault
+// namespaceName is what a namespace may look like before it goes into a Vault
 // path: a Kayra namespace name. Anything else (a slash, "..") is refused,
 // so a caller can't make ulgen read another path.
-var tenantName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var namespaceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// ValidTenant reports whether tenant may be used in a credential path.
-func ValidTenant(tenant string) bool {
-	return tenantName.MatchString(tenant)
+// ValidNamespace reports whether namespace may be used in a credential path.
+func ValidNamespace(namespace string) bool {
+	return namespaceName.MatchString(namespace)
 }
 
 // SecretReader is the part of a Vault client used (vault.Client).
@@ -74,12 +74,12 @@ func Login(ctx context.Context, cfg *config.VaultConfig) (*vault.Client, error) 
 	return client, nil
 }
 
-// Credential reads secret's key at its path for tenant.
-func (v *Vault) Credential(ctx context.Context, secret config.VaultSecret, tenant string) (string, error) {
-	if !ValidTenant(tenant) {
-		return "", fmt.Errorf("credentials: invalid tenant %q", tenant)
+// Credential reads secret's key at its path for namespace.
+func (v *Vault) Credential(ctx context.Context, secret config.VaultSecret, namespace string) (string, error) {
+	if !ValidNamespace(namespace) {
+		return "", fmt.Errorf("credentials: invalid namespace %q", namespace)
 	}
-	path := strings.ReplaceAll(secret.Path, "{tenant}", tenant)
+	path := strings.ReplaceAll(secret.Path, "{namespace}", namespace)
 	cacheKey := secret.Mount + "\x00" + path + "\x00" + secret.Key
 
 	v.mu.Lock()

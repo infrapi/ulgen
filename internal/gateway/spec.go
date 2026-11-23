@@ -15,7 +15,7 @@ import (
 // another write, delete for a destructive one. Upstreams sharing an api
 // share its document. A namespace Role grants them like any other api's:
 //
-//	apis: [mcp.example.io], resources: [prometheus], verbs: [get]
+//	apis: [mcp.infrapi.io], resources: [prometheus], verbs: [get]
 //
 // An upstream borrowing another api's right (check) adds nothing: that api
 // serves its own document.

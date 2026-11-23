@@ -10,11 +10,11 @@ import (
 	"github.com/infrapi/ulgen/internal/config"
 )
 
-// tenantArg is the argument every tenant-scoped tool takes, whatever its
+// namespaceArg is the argument every namespace-scoped tool takes, whatever its
 // upstream calls it.
-const tenantArg = "tenant"
+const namespaceArg = "namespace"
 
-const tenantDescription = "Tenant to act in (a Kayra namespace). The list_tenants tool gives the ones you belong to."
+const namespaceDescription = "The Kayra namespace to act in. The list_namespaces tool gives the ones you belong to."
 
 // tool is one upstream tool as ulgen exposes it.
 type tool struct {
@@ -23,7 +23,7 @@ type tool struct {
 	original string
 	// exposed is the tool as listed to clients.
 	exposed *mcp.Tool
-	// scoped: the tool takes a tenant.
+	// scoped: the tool takes a namespace.
 	scoped bool
 	// resource and verb are what /check is asked for (authorize: ulgen).
 	resource string
@@ -64,35 +64,35 @@ func expose(u *upstream, t *mcp.Tool, rule *config.ToolRule) (*tool, error) {
 
 	scoped := false
 	switch {
-	case u.cfg.Tenant.Inject:
-		if _, taken := props[tenantArg]; taken {
-			return nil, fmt.Errorf("it already has a %q argument", tenantArg)
+	case u.cfg.Namespace.Inject:
+		if _, taken := props[namespaceArg]; taken {
+			return nil, fmt.Errorf("it already has a %q argument", namespaceArg)
 		}
-		props[tenantArg] = map[string]any{"type": "string", "description": tenantDescription}
-		required = append(required, tenantArg)
+		props[namespaceArg] = map[string]any{"type": "string", "description": namespaceDescription}
+		required = append(required, namespaceArg)
 		scoped = true
-	case u.cfg.Tenant.Argument != "":
-		own, ok := props[u.cfg.Tenant.Argument]
+	case u.cfg.Namespace.Argument != "":
+		own, ok := props[u.cfg.Namespace.Argument]
 		if !ok {
-			break // not tenant-scoped: exposed as is
+			break // not namespace-scoped: exposed as is
 		}
-		if _, taken := props[tenantArg]; taken && u.cfg.Tenant.Argument != tenantArg {
-			return nil, fmt.Errorf("it has both %q and %q arguments", u.cfg.Tenant.Argument, tenantArg)
+		if _, taken := props[namespaceArg]; taken && u.cfg.Namespace.Argument != namespaceArg {
+			return nil, fmt.Errorf("it has both %q and %q arguments", u.cfg.Namespace.Argument, namespaceArg)
 		}
-		delete(props, u.cfg.Tenant.Argument)
+		delete(props, u.cfg.Namespace.Argument)
 		arg, _ := own.(map[string]any)
 		renamed := map[string]any{"type": "string"}
 		for k, v := range arg {
 			renamed[k] = v
 		}
-		renamed["description"] = tenantDescription
-		props[tenantArg] = renamed
-		required = slices.DeleteFunc(required, func(s string) bool { return s == u.cfg.Tenant.Argument })
-		required = append(required, tenantArg)
+		renamed["description"] = namespaceDescription
+		props[namespaceArg] = renamed
+		required = slices.DeleteFunc(required, func(s string) bool { return s == u.cfg.Namespace.Argument })
+		required = append(required, namespaceArg)
 		scoped = true
 	}
 	if u.cfg.Authorize == config.AuthorizeUlgen && !scoped {
-		return nil, fmt.Errorf("it names no tenant to check")
+		return nil, fmt.Errorf("it names no namespace to check")
 	}
 	// the right a call needs: the rule's resource, else the borrowed check,
 	// else resource "tools"; the verb from the annotations unless set

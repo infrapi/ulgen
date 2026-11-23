@@ -1,13 +1,13 @@
 ---
 title: Authorization
-description: Who decides whether a caller may call a tool on a tenant, ulgen asking Kayra or the upstream itself, and the Kayra api and roles behind it.
+description: Who decides whether a caller may call a tool on a namespace, ulgen asking Kayra or the upstream itself, and the Kayra api and roles behind it.
 weight: 40
 ---
 
 # Authorization
 
 Each upstream says who decides whether a caller may call one of its tools
-on a tenant: `authorize: ulgen` or `authorize: upstream`.
+on a namespace: `authorize: ulgen` or `authorize: upstream`.
 
 ## authorize: ulgen
 
@@ -15,7 +15,7 @@ Before each call, ulgen asks Kayra's `POST /apis/authorization.<domain>/v1/check
 with the caller's token:
 
 ```json
-{"namespace": "<tenant>", "api": "<upstream api>", "resource": "...", "verb": "..."}
+{"namespace": "<namespace>", "api": "<upstream api>", "resource": "...", "verb": "..."}
 ```
 
 - `resource` comes from the `allowed_tools` rule that matches the tool.
@@ -37,12 +37,12 @@ document declares each rule's resource with the verbs it can be checked
 on. Upstreams that name the same api share its document.
 
 Route that path to ulgen on the gateway Kayra's reconciler reads, then
-register the api and subscribe the tenants. An api with nothing to deploy
-per tenant takes a mode without steps:
+register the api and subscribe the namespaces. An api with nothing to deploy
+per namespace takes a mode without steps:
 
 ```bash
-infrapi-cli create apiregistrations -d '{"name": "mcp.example.io", "active": true, "owner": "sre", "mode": "none"}'
-infrapi-cli create subscriptions -n acme -d '{"api": "mcp.example.io"}'
+infrapi-cli create apiregistrations -d '{"name": "mcp.infrapi.io", "active": true, "owner": "sre", "mode": "none"}'
+infrapi-cli create subscriptions -n acme -d '{"api": "mcp.infrapi.io"}'
 ```
 
 ### Roles per tool family
@@ -58,16 +58,16 @@ allowed_tools:
 ```
 
 ```yaml
-# a Kayra role in the tenant's namespace
+# a Kayra role in the namespace's namespace
 rules:
-  - apis: [mcp.example.io]
+  - apis: [mcp.infrapi.io]
     resources: [prometheus]
     verbs: [get]
 ```
 
 A role's `resources` are the bare names the document declares
-(`prometheus`), not `prometheus.mcp.example.io`. To see what a caller may
-do: `infrapi-cli auth can-i get prometheus.mcp.example.io -n acme`.
+(`prometheus`), not `prometheus.mcp.infrapi.io`. To see what a caller may
+do: `infrapi-cli auth can-i get prometheus.mcp.infrapi.io -n acme`.
 
 ### Borrowing an existing api's right
 
@@ -76,7 +76,7 @@ resource for ask that one right instead. This is for an upstream whose
 rights are an existing api's, such as Grafana read through a telemetry api:
 
 ```yaml
-api: telemetry.example.io
+api: telemetry.infrapi.io
 authorize: ulgen
 check: {resource: dashboards, verb: list}
 ```
@@ -89,8 +89,8 @@ the api serves its own. There is nothing to register.
 
 The upstream checks each call itself, with the caller's own token
 (`credential: {passthrough: true}`), as every infrapi/lib app does. ulgen
-only resolves the caller and the tenant. An upstream that checks its own
+only resolves the caller and the namespace. An upstream that checks its own
 calls needs no api of ulgen's, and no `allowed_tools` resource.
 
-`tenant_check` still tells `list_tenants` where the upstream is usable
-([Tools and tenants](tools.md#list_tenants)).
+`namespace_check` still tells `list_namespaces` where the upstream is usable
+([Tools and namespaces](tools.md#list_namespaces)).

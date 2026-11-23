@@ -13,13 +13,13 @@ ulgen logs JSON on stderr. Each tool call is one `tool call` line:
 | Field | |
 |---|---|
 | `user` | the caller, as Kayra resolved them |
-| `upstream`, `tool`, `tenant` | what was called, and where |
+| `upstream`, `tool`, `namespace` | what was called, and where |
 | `outcome` | `ok`; `refused` by ulgen or Kayra; `tool_error`, an error result from the upstream; `error`, the upstream or Kayra unreachable |
 | `duration_ms` | the call's duration, Kayra's check included |
 | `request_id` | the request's `X-Request-Id` |
 
 ```json
-{"time":"2026-11-23T19:40:02.118Z","level":"INFO","msg":"tool call","user":"jdoe","upstream":"grafana","tool":"query_prometheus","tenant":"acme","outcome":"ok","duration_ms":182,"request_id":"5f0c9a7e-…"}
+{"time":"2026-11-23T19:40:02.118Z","level":"INFO","msg":"tool call","user":"jdoe","upstream":"grafana","tool":"query_prometheus","namespace":"acme","outcome":"ok","duration_ms":182,"request_id":"5f0c9a7e-…"}
 ```
 
 Requests refused for want of a token are logged as warnings, with their

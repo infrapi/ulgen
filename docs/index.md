@@ -1,19 +1,19 @@
 ---
 title: ulgen
-description: One MCP endpoint in front of several MCP servers, every tool scoped to a tenant and every call authorized by Kayra.
+description: One MCP endpoint in front of several MCP servers, every tool scoped to a namespace and every call authorized by Kayra.
 weight: 10
 ---
 
 # ulgen
 
 ulgen is one MCP server in front of several, for multi-tenant use. Every
-tool it exposes takes a `tenant` (a [Kayra](https://github.com/infrapi/kayra)
+tool it exposes takes a `namespace` (a [Kayra](https://github.com/infrapi/kayra)
 namespace). Before each call, ulgen makes sure the caller may act there. It
 then calls the upstream with the right credential: the caller's own token,
-or the tenant's credential, read from Vault.
+or the namespace's credential, read from Vault.
 
 ```text
-MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (tenant credential from Vault)
+MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (namespace credential from Vault)
                                                       └─► an infrapi MCP (caller's token)
 ```
 
@@ -23,9 +23,9 @@ tools:
 - **One endpoint**: `/mcp` serves every upstream's tools, named
   `<upstream>_<tool>`. `/mcp/<upstream>` serves one upstream's tools under
   their own names.
-- **Tenants**: an upstream with no notion of tenant, mcp-grafana for one,
-  gets a `tenant` argument, and the tenant's own credential behind it. An
-  infrapi MCP's `namespace` argument becomes `tenant`. `list_tenants`
+- **Namespaces**: an upstream with no notion of namespace, mcp-grafana for one,
+  gets a `namespace` argument, and the namespace's own credential behind it. An
+  infrapi MCP's `namespace` argument becomes `namespace`. `list_namespaces`
   answers the caller's namespaces and the upstreams usable in each.
 - **Rights in Kayra**: ulgen asks Kayra's `/check` before each call, on a
   resource per tool family (`prometheus`, `loki`, `dashboards`...). It
@@ -42,8 +42,8 @@ tools:
 | I want to... | Go to |
 |---|---|
 | Run ulgen and connect an MCP client | [Getting started](getting-started.md) |
-| Choose which tools are exposed, and how tenants are named | [Tools and tenants](tools.md) |
-| Grant or withhold tools per tenant in Kayra | [Authorization](authorization.md) |
+| Choose which tools are exposed, and how namespaces are named | [Tools and namespaces](tools.md) |
+| Grant or withhold tools per namespace in Kayra | [Authorization](authorization.md) |
 | Understand how callers authenticate, and the 401 that starts an MCP client's login | [Callers](callers.md) |
 | Give an upstream its credentials | [Credentials](credentials.md) |
 | Follow a call through the logs, and scrape the metrics | [Audit log and metrics](observability.md) |

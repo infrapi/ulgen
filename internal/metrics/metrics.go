@@ -23,7 +23,7 @@ type Metrics struct {
 	// Kayra times ulgen's requests to Kayra: op (verify, check,
 	// namespaces), result (ok, denied, refused, error).
 	Kayra *prometheus.HistogramVec
-	// CredentialReads counts tenant credential reads: upstream, result
+	// CredentialReads counts namespace credential reads: upstream, result
 	// (ok, error).
 	CredentialReads *prometheus.CounterVec
 	// Unauthenticated counts requests refused before any tool: reason
@@ -54,7 +54,7 @@ func New(version string) *Metrics {
 			Buckets: prometheus.DefBuckets,
 		}, []string{"op", "result"}),
 		CredentialReads: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ulgen_credential_reads_total", Help: "Tenant credential reads (Vault, cached), by upstream and result.",
+			Name: "ulgen_credential_reads_total", Help: "Namespace credential reads (Vault, cached), by upstream and result.",
 		}, []string{"upstream", "result"}),
 		Unauthenticated: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ulgen_unauthenticated_requests_total", Help: "Requests refused for want of a valid token, by reason.",
