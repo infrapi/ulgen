@@ -27,6 +27,10 @@ upstreams:
     tenant: {inject: true}
     headers_from_env:
       Authorization: MCP_GRAFANA_CALLER_AUTH   # "Bearer <mcp-grafana --server-auth-token>"
+    # Or no api of its own: borrow an existing api's right, one for every call
+    # (read-only tools only, no spec served, nothing to register):
+    #   api: telemetry.example.io
+    #   check: {resource: dashboards, verb: list}
 
   # An infrapi/lib MCP: it checks every call itself with the caller's token.
   - name: telemetry

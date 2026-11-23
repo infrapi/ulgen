@@ -86,8 +86,10 @@ type Upstream struct {
 	Name string `yaml:"name"`
 	// URL is its Streamable HTTP endpoint.
 	URL string `yaml:"url"`
-	// API is the Kayra api (long name) this upstream is registered as:
-	// the /check api, with authorize: ulgen and for list_tenants.
+	// API is the Kayra api (long name) /check is asked about, with
+	// authorize: ulgen and for list_tenants: the api this upstream is
+	// registered as, or, with Check, an existing api whose rights it
+	// borrows.
 	API string `yaml:"api"`
 	// Version of API, for its OpenAPI document; "v1" when empty.
 	Version   string    `yaml:"version"`
@@ -96,9 +98,18 @@ type Upstream struct {
 	// this upstream is usable in a tenant. With authorize: ulgen it is
 	// resource "tools", verb "get" unless set; with authorize: upstream,
 	// unset lists the upstream in every tenant of the caller.
-	TenantCheck *Check     `yaml:"tenant_check"`
-	Credential  Credential `yaml:"credential"`
-	Tenant      Tenant     `yaml:"tenant"`
+	TenantCheck *Check `yaml:"tenant_check"`
+	// Check, with authorize: ulgen, is the one right every call needs:
+	// resource and verb on API, instead of resource "tools" and a verb
+	// from the tool's annotations. For an upstream with no api of its own
+	// in Kayra, whose rights are another api's (Grafana's read tools on a
+	// telemetry api's dashboards: list). One right can't tell reads from
+	// writes, so only the upstream's read-only tools are exposed. It is
+	// also the default TenantCheck, and ulgen serves no OpenAPI document
+	// for API: the api serves its own.
+	Check      *Check     `yaml:"check"`
+	Credential Credential `yaml:"credential"`
+	Tenant     Tenant     `yaml:"tenant"`
 	// ProtocolVersion is the MCP protocol version ulgen opens its session
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
@@ -228,8 +239,19 @@ func (c *Config) Validate() error {
 		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
 			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
 		}
+		if u.Check != nil {
+			if u.Authorize != AuthorizeUlgen {
+				return fmt.Errorf("%s.check: only with authorize: ulgen (an upstream authorizing itself decides alone)", where)
+			}
+			if u.Check.Resource == "" || u.Check.Verb == "" {
+				return fmt.Errorf("%s.check: needs resource and verb", where)
+			}
+		}
 		if u.Authorize == AuthorizeUlgen && u.TenantCheck == nil {
 			u.TenantCheck = &Check{Resource: "tools", Verb: "get"}
+			if u.Check != nil {
+				u.TenantCheck = &Check{Resource: u.Check.Resource, Verb: u.Check.Verb}
+			}
 		}
 		if u.Tenant.Inject && u.Tenant.Argument != "" {
 			return fmt.Errorf("%s.tenant: inject and argument are exclusive", where)

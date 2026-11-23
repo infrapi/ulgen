@@ -150,6 +150,12 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness, its configuration changed by edit first.
+func newHarnessWith(t *testing.T, edit func(*config.Config)) *harness {
+	t.Helper()
 	t.Setenv("GRAFANA_BEARER", "Bearer grafana-server-token")
 	cfg := &config.Config{
 		Kayra: config.KayraConfig{URL: "http://kayra.invalid"},
@@ -168,6 +174,9 @@ func newHarness(t *testing.T) *harness {
 				TenantCheck: &config.Check{Resource: "dashboards", Verb: "list"},
 			},
 		},
+	}
+	if edit != nil {
+		edit(cfg)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -464,6 +473,46 @@ func TestSpec(t *testing.T) {
 	}
 	if resp, err := http.Get(h.ulgen.URL + "/apis/telemetry.example.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
 		t.Errorf("telemetry authorizes itself, ulgen must not serve its spec")
+	} else if err := resp.Body.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+}
+
+// With check, grafana borrows telemetry's rights: one right for every call,
+// read-only tools only, no OpenAPI document of its own.
+func TestFixedCheck(t *testing.T) {
+	h := newHarnessWith(t, func(c *config.Config) {
+		c.Upstreams[0].API = "telemetry.example.io"
+		c.Upstreams[0].Check = &config.Check{Resource: "dashboards", Verb: "get"}
+	})
+	s := h.session(t, "alice-token")
+	names := toolNames(t, s)
+	if !slices.Contains(names, "grafana_query_prometheus") {
+		t.Errorf("the read-only tool must be exposed: %v", names)
+	}
+	for _, n := range []string{"grafana_delete_dashboard", "grafana_create_folder", "grafana_has_tenant"} {
+		if slices.Contains(names, n) {
+			t.Errorf("%s is not read-only: one right can't allow it: %v", n, names)
+		}
+	}
+
+	if out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"tenant": "acme", "expr": "up"}); isErr || !strings.Contains(out, "token:sa-acme") {
+		t.Errorf("acme query: %v %s", isErr, out)
+	}
+	// globex is not subscribed to telemetry: refused, though grafana's own rights would allow get
+	if out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"tenant": "globex", "expr": "up"}); !isErr || strings.Contains(out, "sa-globex") {
+		t.Errorf("globex query: %v %s", isErr, out)
+	}
+	h.kayra.mu.Lock()
+	for _, c := range h.kayra.checks {
+		if c.Api != "telemetry.example.io" || c.Resource != "dashboards" || c.Verb != "get" {
+			t.Errorf("check = %+v, want telemetry.example.io dashboards get", c)
+		}
+	}
+	h.kayra.mu.Unlock()
+
+	if resp, err := http.Get(h.ulgen.URL + "/apis/telemetry.example.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
+		t.Errorf("the borrowed api serves its own document, not ulgen")
 	} else if err := resp.Body.Close(); err != nil {
 		t.Errorf("close: %v", err)
 	}
