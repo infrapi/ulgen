@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: go-semantic-release/action@v1
+        id: semrel
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-initial-development-versions: true
+
+      # The tag semantic-release created with GITHUB_TOKEN triggers no other
+      # workflow: GoReleaser runs here, in the same job, when there is a release.
+      - name: Fetch the tag semantic-release just created
+        if: steps.semrel.outputs.version != ''
+        run: git fetch --tags origin
+
+      # semantic-release leaves untracked files; GoReleaser refuses a dirty tree.
+      - name: Clean up semantic-release's working files
+        if: steps.semrel.outputs.version != ''
+        run: git clean -ffdx
+
+      - uses: actions/setup-go@v7
+        if: steps.semrel.outputs.version != ''
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v7
+        if: steps.semrel.outputs.version != ''
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
