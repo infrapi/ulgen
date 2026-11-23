@@ -1,6 +1,8 @@
 # ulgen configuration example.
 listen: ":8080"
 path: /mcp
+# a 401's WWW-Authenticate names it (RFC 9728): where MCP clients find the authorization server
+resource_metadata: https://api.example.com/.well-known/oauth-protected-resource/mcp
 # HTTPS: callers' tokens cross the network from the gateway in front. The files
 # are re-read when they change: a renewed certificate needs no restart.
 # tls: {cert_file: /etc/ulgen/tls/cert.pem, key_file: /etc/ulgen/tls/key.pem}
@@ -28,6 +30,8 @@ upstreams:
       vault: {mount: secret, path: "mcp-gateway/grafana/{tenant}", key: token}
       header: X-Grafana-Service-Account-Token
     tenant: {inject: true}
+    # the tools exposed: regular expressions on the whole tool name (none: every tool)
+    allowed_tools: ["search_.*", "get_.*", "list_.*", "query_.*", "find_.*"]
     headers_from_env:
       Authorization: MCP_GRAFANA_CALLER_AUTH   # "Bearer <mcp-grafana --server-auth-token>"
     # Or no api of its own: borrow an existing api's right, one for every call

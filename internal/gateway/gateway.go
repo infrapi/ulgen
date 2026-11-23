@@ -71,6 +71,14 @@ type Options struct {
 
 type tokenKey struct{}
 
+type callerKey struct{}
+
+// caller is the caller's Kayra user id, set by Handler: the audit log's.
+func caller(ctx context.Context) string {
+	c, _ := ctx.Value(callerKey{}).(string)
+	return c
+}
+
 // token is the caller's bearer token, set by Handler.
 func token(ctx context.Context) string {
 	t, _ := ctx.Value(tokenKey{}).(string)
@@ -159,9 +167,13 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		tok = strings.TrimSpace(tok)
 		if !ok || tok == "" {
-			// The MCP handshake and tools/list, without a token: a gateway's
-			// health check and UI (LiteLLM's, no user behind them). The tool
-			// list is the same for everyone; calling a tool takes a token.
+			// With anonymous_listing, the MCP handshake and tools/list without a
+			// token: a gateway's health check and UI, no user behind them. The
+			// tool list is the same for everyone; calling a tool takes a token.
+			if !g.cfg.AnonymousListing {
+				unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
+				return
+			}
 			if handshake, err := isHandshake(r); err != nil {
 				http.Error(w, "unreadable request", http.StatusBadRequest)
 				return
@@ -170,21 +182,26 @@ func (g *Gateway) Handler() http.Handler {
 				return
 			}
 			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path)
-			unauthorized(w, "a bearer token is required")
+			unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
 			return
 		}
-		if _, err := g.kayra.Verify(r.Context(), tok); err != nil {
+		user, err := g.kayra.Verify(r.Context(), tok)
+		if err != nil {
 			var ie *infraerrors.Error
 			if errors.As(err, &ie) && ie.Code == http.StatusUnauthorized {
 				g.log.Warn("refusing a caller: Kayra refused the token", "path", r.URL.Path, "error", err)
-				unauthorized(w, "the token was refused")
+				unauthorized(w, g.cfg.ResourceMetadata, "the token was refused")
 				return
 			}
 			g.log.Error("verifying a caller", "error", err)
 			http.Error(w, "the authorization service is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		mcpHandler.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tokenKey{}, tok)))
+		ctx := context.WithValue(r.Context(), tokenKey{}, tok)
+		if user != nil {
+			ctx = context.WithValue(ctx, callerKey{}, user.Subject)
+		}
+		mcpHandler.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -222,8 +239,14 @@ func isHandshake(r *http.Request) (bool, error) {
 	return handshakeMethods[msg.Method], nil
 }
 
-func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", `Bearer realm="ulgen"`)
+// unauthorized answers 401, its challenge naming the resource metadata when
+// set (RFC 9728): an MCP client learns there where to log in.
+func unauthorized(w http.ResponseWriter, resourceMetadata, msg string) {
+	challenge := `Bearer realm="ulgen"`
+	if resourceMetadata != "" {
+		challenge = fmt.Sprintf(`Bearer resource_metadata=%q`, resourceMetadata)
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
 	http.Error(w, msg, http.StatusUnauthorized)
 }
 
@@ -290,6 +313,9 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 			continue
 		}
 		for _, lt := range listed {
+			if !u.cfg.ToolAllowed(lt.Name) {
+				continue // allowed_tools: not exposed
+			}
 			t, err := expose(u, lt)
 			if err != nil {
 				g.log.Warn("tool left out", "upstream", u.cfg.Name, "tool", lt.Name, "reason", err.Error())
@@ -345,8 +371,25 @@ func toolError(format string, args ...any) *mcp.CallToolResult {
 // call is the handler of one exposed tool.
 func (g *Gateway) call(t *tool) mcp.ToolHandler {
 	u := t.upstream
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
 		tok := token(ctx)
+		// the audit log: one line per call, who, where, what, and how it ended
+		start := g.now()
+		tenant := ""
+		reached := false // the upstream answered: an error result is the tool's, not a refusal
+		defer func() {
+			outcome := "ok"
+			switch {
+			case err != nil:
+				outcome = "error"
+			case res != nil && res.IsError && !reached:
+				outcome = "refused"
+			case res != nil && res.IsError:
+				outcome = "tool_error"
+			}
+			g.log.Info("tool call", "user", caller(ctx), "upstream", u.cfg.Name, "tool", t.original,
+				"tenant", tenant, "outcome", outcome, "duration_ms", g.now().Sub(start).Milliseconds())
+		}()
 		args := map[string]any{}
 		if len(req.Params.Arguments) > 0 {
 			if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
@@ -354,7 +397,6 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			}
 		}
 
-		tenant := ""
 		if t.scoped {
 			tenant, _ = args[tenantArg].(string)
 			if !credentials.ValidTenant(tenant) {
@@ -399,12 +441,13 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			headers.Set(u.cfg.Credential.Header, u.cfg.Credential.Prefix+cred)
 		}
 
-		res, err := u.client.callTool(ctx, headers, t.original, args)
+		out, err := u.client.callTool(ctx, headers, t.original, args)
 		if err != nil {
 			g.log.Error("calling an upstream tool", "upstream", u.cfg.Name, "tool", t.original, "error", err)
 			return nil, fmt.Errorf("ulgen: %s is unavailable", u.cfg.Name)
 		}
-		return res, nil
+		reached = true
+		return out, nil
 	}
 }
 

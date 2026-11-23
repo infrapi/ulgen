@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -396,7 +398,7 @@ func toolNames(t *testing.T, s *mcp.ClientSession) []string {
 // TestWithoutToken: a gateway's health check and UI (no user) open a
 // session and list the tools; calling one takes a caller's token.
 func TestWithoutToken(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
 	s := anonymous(t, h, "/mcp")
 	if err := s.Ping(context.Background(), nil); err != nil {
 		t.Errorf("ping without a token: %v", err)
@@ -421,7 +423,7 @@ func TestWithoutToken(t *testing.T) {
 }
 
 func TestListTokenFile(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
 	path := filepath.Join(t.TempDir(), "list-token")
 	if err := os.WriteFile(path, []byte("bob-token\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -518,6 +520,107 @@ func TestFixedCheck(t *testing.T) {
 	}
 }
 
+// Without anonymous_listing, every request needs a token: a client without
+// one gets the 401 naming the resource metadata, which starts its login.
+func TestTokenRequired(t *testing.T) {
+	h := newHarnessWith(t, func(c *config.Config) {
+		c.ResourceMetadata = "https://gateway.example/.well-known/oauth-protected-resource/mcp"
+	})
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`
+	resp, err := http.Post(h.ulgen.URL+"/mcp", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+	want := `Bearer resource_metadata="https://gateway.example/.well-known/oauth-protected-resource/mcp"`
+	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") != want {
+		t.Errorf("initialize without a token: %d %q, want 401 %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"), want)
+	}
+	// with a token, as before
+	if names := toolNames(t, h.session(t, "alice-token")); !slices.Contains(names, "grafana_query_prometheus") {
+		t.Errorf("tools with a token = %v", names)
+	}
+}
+
+// allowed_tools: only the upstream's tools a regular expression matches
+// whole are listed, and the others can't be called.
+func TestAllowedTools(t *testing.T) {
+	h := newHarnessWith(t, func(c *config.Config) {
+		c.Upstreams[0].AllowedTools = []string{"query_.*", "create_fold"}
+	})
+	s := h.session(t, "alice-token")
+	names := toolNames(t, s)
+	if !slices.Contains(names, "grafana_query_prometheus") {
+		t.Errorf("query_prometheus must be listed: %v", names)
+	}
+	for _, n := range []string{"grafana_delete_dashboard", "grafana_has_tenant", "grafana_create_folder"} {
+		if slices.Contains(names, n) {
+			t.Errorf("%s must not be listed (a whole-name match only): %v", n, names)
+		}
+	}
+	if !slices.Contains(names, "telemetry_list_dashboards") {
+		t.Errorf("an upstream without allowed_tools keeps every tool: %v", names)
+	}
+	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "grafana_delete_dashboard", Arguments: map[string]any{"tenant": "acme", "uid": "x"}}); err == nil {
+		t.Errorf("a tool left out by allowed_tools was called")
+	}
+}
+
+// The audit log: one line per call, the caller, the tenant, the tool and
+// how it ended.
+func TestAuditLog(t *testing.T) {
+	var buf syncBuffer
+	h := newHarnessWith(t, nil)
+	h.g.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	s := h.session(t, "alice-token")
+	callText(t, s, "grafana_query_prometheus", map[string]any{"tenant": "acme", "expr": "up"})
+	callText(t, s, "grafana_delete_dashboard", map[string]any{"tenant": "globex", "uid": "x"})
+
+	var calls []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var e map[string]any
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if e["msg"] == "tool call" {
+			calls = append(calls, e)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("tool call lines = %v", calls)
+	}
+	for i, want := range []map[string]string{
+		{"user": "alice", "upstream": "grafana", "tool": "query_prometheus", "tenant": "acme", "outcome": "ok"},
+		{"user": "alice", "upstream": "grafana", "tool": "delete_dashboard", "tenant": "globex", "outcome": "refused"},
+	} {
+		for k, v := range want {
+			if calls[i][k] != v {
+				t.Errorf("call %d: %s = %v, want %q", i, k, calls[i][k], v)
+			}
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the log's concurrent writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestVerbOf(t *testing.T) {
 	for want, a := range map[string]*mcp.ToolAnnotations{
 		"get":    {ReadOnlyHint: true},
@@ -599,7 +702,7 @@ func (h header) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestTokenHeader(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
 	h.g.cfg.TokenHeader = "X-Kayra-Token"
 	for _, v := range []string{"Bearer alice-token", "alice-token"} {
 		c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
