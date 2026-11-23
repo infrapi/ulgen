@@ -5,6 +5,8 @@ One MCP server in front of several, for multi-tenant use: every tool takes a
 makes sure the caller may act there before calling the upstream with the
 right credential.
 
+Documentation: [infrapi.io/products/ulgen](https://infrapi.io/products/ulgen/), from [`docs/`](docs/index.md).
+
 ```
 MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (tenant credential from Vault)
                                                       └─► telemetry MCP (caller's token)
