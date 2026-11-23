@@ -1,0 +1,27 @@
+version: 2
+
+project_name: ulgen
+
+builds:
+  - id: ulgen
+    main: ./cmd/ulgen
+    binary: ulgen
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: ulgen
+    ids: [ulgen]
+    name_template: >-
+      ulgen_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    files:
+      - README.md
+      - ulgen.example.yaml
+
+checksum:
+  name_template: "checksums.txt"

@@ -32,9 +32,17 @@ func main() {
 	}
 }
 
+// version is set at build time: -ldflags "-X main.version=...".
+var version = "dev"
+
 func run() error {
 	path := flag.String("config", "ulgen.yaml", "configuration file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		_, err := fmt.Println(version)
+		return err
+	}
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
@@ -87,7 +95,7 @@ func run() error {
 	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("ulgen listening", "address", cfg.Listen, "tls", cfg.TLS != nil, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
+		log.Info("ulgen listening", "version", version, "address", cfg.Listen, "tls", cfg.TLS != nil, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
 		errc <- serve()
 	}()
 
