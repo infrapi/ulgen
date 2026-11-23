@@ -29,7 +29,7 @@ client ──► ulgen /mcp  Bearer <token>
 ulgen does not serve the metadata itself. Serve it next to the MCP endpoint,
 from the gateway in front or as a static document, naming Kayra in
 `authorization_servers`. Kayra's side is its
-[authorization server](https://infrapi.github.io/kayra/architecture/oauth2-server/).
+[authorization server](https://infrapi.github.io/kayra/architecture/auth/oauth2-server/).
 
 ### One token for every API
 

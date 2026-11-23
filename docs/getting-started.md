@@ -14,7 +14,7 @@ You need:
 
 - a [Kayra](https://github.com/infrapi/kayra) server, with its OAuth
   authorization server enabled for MCP clients to log in
-  ([Authorization server](https://infrapi.github.io/kayra/architecture/oauth2-server/));
+  ([Authorization server](https://infrapi.github.io/kayra/architecture/auth/oauth2-server/));
 - a Vault holding each namespace's Grafana token (KV v2), and an AppRole for
   ulgen to read them.
 
