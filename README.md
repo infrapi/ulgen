@@ -16,6 +16,7 @@ Endpoints:
 - `<path>/<upstream>` (`/mcp/grafana`): one upstream, its tools under their own names;
 - `/apis/<api>/<version>/-/openapi.json`: the OpenAPI document Kayra reads to register an api ulgen
   authorizes calls on (below);
+- `/metrics`: Prometheus metrics (below);
 - `/healthz`.
 
 Each MCP endpoint also has `list_tenants`.
@@ -87,11 +88,30 @@ or UI has no user behind it. A passthrough upstream is then listed with `list_to
 ulgen's own, never used to call a tool), or keeps the tools a caller's listing found. Such a proxy may also
 pass the token in a header of its own: `token_header`.
 
-## Audit log
+## Audit log and metrics
 
 One `tool call` line per call, in the JSON log on stderr: the caller (`user`), `upstream`, `tool`,
 `tenant`, `outcome` (`ok`; `refused` by ulgen or Kayra; `tool_error`, an error result of the upstream's;
-`error`, the upstream or Kayra unreachable) and `duration_ms`.
+`error`, the upstream or Kayra unreachable), `duration_ms` and `request_id`.
+
+`request_id` is the request's `X-Request-Id`, as a proxy in front sets it; ulgen passes it on to the
+upstream it calls, so one request can be followed across the components' logs.
+
+`/metrics`, on the same listener (to scrape it from the node: ulgen usually listens on the loopback,
+behind a proxy that routes no `/metrics`):
+
+| Metric | Labels |
+|---|---|
+| `ulgen_tool_calls_total` | `upstream`, `tool`, `outcome` (as the audit log) |
+| `ulgen_tool_call_duration_seconds` | `upstream`, `outcome` |
+| `ulgen_kayra_request_duration_seconds` | `op` (`verify`, `check`, `namespaces`), `result` (`ok`, `denied`, `refused`, `error`) |
+| `ulgen_credential_reads_total` | `upstream`, `result` (`ok`, `error`) |
+| `ulgen_unauthenticated_requests_total` | `reason` (`no_token`, `refused_token`) |
+| `ulgen_tools_exposed` | `upstream`: the tools exposed, as last listed |
+| `ulgen_tools_list_errors_total` | `upstream` |
+| `ulgen_build_info` | `version` |
+
+and the Go runtime's and the process's.
 
 ## Run
 

@@ -22,6 +22,7 @@ import (
 	"github.com/infrapi/ulgen/internal/config"
 	"github.com/infrapi/ulgen/internal/credentials"
 	"github.com/infrapi/ulgen/internal/gateway"
+	"github.com/infrapi/ulgen/internal/metrics"
 	"github.com/infrapi/ulgen/internal/tlsfile"
 )
 
@@ -59,7 +60,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	opts := gateway.Options{Kayra: gateway.NewKayraClient(authClient, cfg.Kayra.URL, nil), Logger: log}
+	opts := gateway.Options{Kayra: gateway.NewKayraClient(authClient, cfg.Kayra.URL, nil), Logger: log, Metrics: metrics.New(version)}
 	if cfg.Vault != nil {
 		vc, err := credentials.Login(ctx, cfg.Vault)
 		if err != nil {
@@ -79,6 +80,9 @@ func run() error {
 	mux.Handle(cfg.Path, mcpHandler)
 	mux.Handle(strings.TrimRight(cfg.Path, "/")+"/", mcpHandler) // <path>/<upstream>
 	mux.Handle("/apis/", g.SpecHandler())
+	// Prometheus metrics: for a collector on the node (ulgen listens on the
+	// loopback behind its proxy, which routes no /metrics)
+	mux.Handle("/metrics", g.MetricsHandler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
