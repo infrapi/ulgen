@@ -66,6 +66,7 @@ func TestLoad(t *testing.T) {
 		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
 		"missing env header":        {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
 		"tls without key":           {"kayra: {url: https://kayra.example.com}", "kayra: {url: https://kayra.example.com}\ntls: {cert_file: /etc/ulgen/cert.pem}", "tls: cert_file and key_file"},
+		"bad allowed_tools":         {"tenant: {inject: true}", "tenant: {inject: true}\n    allowed_tools: [\"query_(\"]", "allowed_tools"},
 		"check without verb":        {"tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
 		"check on upstream":         {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
 	}

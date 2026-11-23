@@ -6,14 +6,12 @@ makes sure the caller may act there before calling the upstream with the
 right credential.
 
 ```
-MCP client ──► (gateway: LiteLLM, ...) ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (tenant credential from Vault)
+MCP client ──► APISIX (OAuth metadata) ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (tenant credential from Vault)
                                                                                   └─► telemetry MCP (caller's token)
 ```
 
 Endpoints: `<path>` (`/mcp`) serves every upstream, tools named `<upstream>_<tool>`; `<path>/<upstream>`
-(`/mcp/grafana`) serves one upstream, its tools under their own names, each with `list_tenants`. A gateway in
-front (LiteLLM) then declares one MCP server per service, each with its own allowed tools, access groups and
-limits, all of them ulgen.
+(`/mcp/grafana`) serves one upstream, its tools under their own names, each with `list_tenants`.
 
 Nothing is configured per tool:
 
@@ -52,17 +50,23 @@ Nothing is configured per tool:
   gateway and the APIs under one host and make that host Kayra's
   `oauth2.resources`: the token the client gets for the gateway is then good
   for every API behind it.
-- **Which tools a person sees** is not ulgen's business: the gateway in
-  front decides (LiteLLM's allowed tools).
+- **Which tools are exposed**: `allowed_tools`, per upstream, regular
+  expressions matching the whole tool name (the upstream's own); others are
+  neither listed nor callable. None: every tool.
+- **Audit log**: one `tool call` line per call, with the caller (`user`),
+  `upstream`, `tool`, `tenant`, `outcome` (`ok`, `refused` by ulgen or Kayra,
+  `tool_error` from the upstream, `error`) and `duration_ms`.
 
-The MCP handshake and `tools/list` (`initialize`, `notifications/initialized`, `ping`, `tools/list`) need no
-token: a gateway's health check and UI (LiteLLM's) have no user behind them, and the tool list is the same for
-everyone. Without a caller, a passthrough upstream is listed with `list_token_file` (a Kayra token of ulgen's
-own, never used to call a tool), or keeps the tools a caller's listing found. Every tool call takes the
-caller's token, in `token_header` (`Authorization` by default; behind LiteLLM, a dedicated `X-Kayra-Token` that
-its MCP servers forward with `extra_headers`: LiteLLM withholds the client's `Authorization` from
-client-forwarded servers listed together on `/mcp`, RFC 9700), resolved by Kayra (`/oauth2/userinfo`,
-cached `kayra.cache_ttl`); `/check` is never cached.
+Every request takes the caller's token, in `token_header` (`Authorization` by default), resolved by Kayra
+(`/oauth2/userinfo`, cached `kayra.cache_ttl`); `/check` is never cached. Without one, ulgen answers 401, its
+`WWW-Authenticate` naming `resource_metadata` (RFC 9728) when set: an MCP client finds there the
+authorization server to log in at (APISIX serves that document).
+
+With `anonymous_listing: true`, the MCP handshake and `tools/list` (`initialize`, `notifications/initialized`,
+`ping`, `tools/list`) need no token: for a gateway in front whose health check and UI have no user behind them
+(LiteLLM). A passthrough upstream is then listed with `list_token_file` (a Kayra token of ulgen's own, never
+used to call a tool), or keeps the tools a caller's listing found. Behind such a gateway, `token_header` can be
+a dedicated header (`X-Kayra-Token`, LiteLLM's servers forwarding it with `extra_headers`).
 
 ## Run
 

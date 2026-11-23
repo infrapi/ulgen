@@ -28,6 +28,15 @@ type Config struct {
 	// MCP servers forward (extra_headers): LiteLLM withholds Authorization
 	// from client-forwarded servers listed together (RFC 9700).
 	TokenHeader string `yaml:"token_header"`
+	// ResourceMetadata is the URL of the OAuth protected resource metadata
+	// (RFC 9728) a 401 names in WWW-Authenticate: where an MCP client
+	// finds the authorization server to log in at.
+	ResourceMetadata string `yaml:"resource_metadata"`
+	// AnonymousListing serves the MCP handshake and tools/list without a
+	// token: a gateway's health check and UI with no user behind them. Off,
+	// every request needs a token, and a client without one gets the 401
+	// that starts its login.
+	AnonymousListing bool `yaml:"anonymous_listing"`
 	// ListTokenFile, optional, holds a Kayra token of ulgen's own, re-read
 	// at each listing: what lists the tools of a passthrough upstream (one
 	// that wants a token for anything, an infrapi/lib MCP) when tools/list
@@ -124,10 +133,30 @@ type Upstream struct {
 	// with; the upstream may answer an older one. "2025-06-18" when empty:
 	// newer versions are refused by stateful servers (mcp-grafana).
 	ProtocolVersion string `yaml:"protocol_version"`
+	// AllowedTools, when set, are the upstream's tools exposed: regular
+	// expressions matching the whole tool name (the upstream's, not
+	// prefixed). Others are neither listed nor callable.
+	AllowedTools []string `yaml:"allowed_tools"`
+	allowed      []*regexp.Regexp
+
 	// HeadersFromEnv are static headers sent on every request, valued
 	// from environment variables (header -> variable name): the bearer
 	// mcp-grafana's --server-auth-token expects, for instance.
 	HeadersFromEnv map[string]string `yaml:"headers_from_env"`
+}
+
+// ToolAllowed tells whether the upstream's tool name is exposed: every tool
+// without allowed_tools, else one an expression matches whole.
+func (u *Upstream) ToolAllowed(name string) bool {
+	if len(u.AllowedTools) == 0 {
+		return true
+	}
+	for _, re := range u.allowed {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // Credential says what identifies ulgen's calls to an upstream.
@@ -251,6 +280,14 @@ func (c *Config) Validate() error {
 		}
 		if u.TenantCheck != nil && (u.TenantCheck.Resource == "" || u.TenantCheck.Verb == "" || u.API == "") {
 			return fmt.Errorf("%s.tenant_check: needs resource, verb and the upstream's api", where)
+		}
+		u.allowed = nil
+		for _, expr := range u.AllowedTools {
+			re, err := regexp.Compile("^(?:" + expr + ")$")
+			if err != nil {
+				return fmt.Errorf("%s.allowed_tools: %q: %w", where, expr, err)
+			}
+			u.allowed = append(u.allowed, re)
 		}
 		if u.Check != nil {
 			if u.Authorize != AuthorizeUlgen {
