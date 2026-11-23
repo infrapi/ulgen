@@ -25,7 +25,7 @@ tools:
   their own names.
 - **Namespaces**: an upstream with no notion of namespace, mcp-grafana for one,
   gets a `namespace` argument, and the namespace's own credential behind it. An
-  infrapi MCP's `namespace` argument becomes `namespace`. `list_namespaces`
+  infrapi MCP's own `namespace` argument is exposed as it is. `list_namespaces`
   answers the caller's namespaces and the upstreams usable in each.
 - **Rights in Kayra**: ulgen asks Kayra's `/check` before each call, on a
   resource per tool family (`prometheus`, `loki`, `dashboards`...). It
