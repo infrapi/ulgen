@@ -71,5 +71,10 @@ go run ./cmd/ulgen -config ulgen.yaml     # see ulgen.example.yaml
 go test -race ./...
 ```
 
+With `tls: {cert_file, key_file}`, ulgen serves HTTPS (TLS 1.2 at least): the
+callers' tokens cross the network from the gateway in front. The PEM files are
+re-read when they change, so a renewed certificate is served without a
+restart; one that fails to load keeps the previous one served.
+
 Upstream sessions are opened with MCP protocol `2025-06-18` by default
 (`protocol_version`): stateful servers such as mcp-grafana refuse newer ones.

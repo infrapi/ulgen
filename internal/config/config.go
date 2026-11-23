@@ -18,6 +18,9 @@ import (
 type Config struct {
 	// Listen is the HTTP listen address, ":8080" when empty.
 	Listen string `yaml:"listen"`
+	// TLS, when set, serves HTTPS on Listen: callers' tokens cross the
+	// network between the gateway in front and ulgen.
+	TLS *TLSConfig `yaml:"tls"`
 	// Path is where the MCP endpoint is served, "/mcp" when empty.
 	Path string `yaml:"path"`
 	// TokenHeader carries the caller's Kayra token, "Authorization" when
@@ -43,6 +46,13 @@ type Config struct {
 	// Go duration, 1m when empty.
 	CredentialTTL string     `yaml:"credential_ttl"`
 	Upstreams     []Upstream `yaml:"upstreams"`
+}
+
+// TLSConfig is ulgen's server certificate: PEM files, re-read when they
+// change (a renewed certificate is served without a restart).
+type TLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
 }
 
 // KayraConfig points at Kayra.
@@ -191,6 +201,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Kayra.URL == "" {
 		return fmt.Errorf("kayra.url is required")
+	}
+	if c.TLS != nil && (c.TLS.CertFile == "" || c.TLS.KeyFile == "") {
+		return fmt.Errorf("tls: cert_file and key_file are required")
 	}
 	for name, v := range map[string]string{"tools_ttl": c.ToolsTTL, "credential_ttl": c.CredentialTTL, "kayra.cache_ttl": c.Kayra.CacheTTL} {
 		if v == "" {

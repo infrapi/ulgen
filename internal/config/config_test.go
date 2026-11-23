@@ -65,6 +65,7 @@ func TestLoad(t *testing.T) {
 		"no vault":                  {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
 		"tenant_check without verb": {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    tenant_check: {resource: dashboards}", "tenant_check"},
 		"missing env header":        {"tenant: {inject: true}", "tenant: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
+		"tls without key":           {"kayra: {url: https://kayra.example.com}", "kayra: {url: https://kayra.example.com}\ntls: {cert_file: /etc/ulgen/cert.pem}", "tls: cert_file and key_file"},
 		"check without verb":        {"tenant: {inject: true}", "tenant: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
 		"check on upstream":         {"tenant: {argument: namespace}", "tenant: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
 	}

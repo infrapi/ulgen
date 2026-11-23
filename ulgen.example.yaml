@@ -1,6 +1,9 @@
 # ulgen configuration example.
 listen: ":8080"
 path: /mcp
+# HTTPS: callers' tokens cross the network from the gateway in front. The files
+# are re-read when they change: a renewed certificate needs no restart.
+# tls: {cert_file: /etc/ulgen/tls/cert.pem, key_file: /etc/ulgen/tls/key.pem}
 
 kayra:
   url: https://kayra.example.com       # userinfo, /check, the caller's namespaces
