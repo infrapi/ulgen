@@ -313,10 +313,11 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 			continue
 		}
 		for _, lt := range listed {
-			if !u.cfg.ToolAllowed(lt.Name) {
+			rule, ok := u.cfg.ToolRule(lt.Name)
+			if !ok {
 				continue // allowed_tools: not exposed
 			}
-			t, err := expose(u, lt)
+			t, err := expose(u, lt, rule)
 			if err != nil {
 				g.log.Warn("tool left out", "upstream", u.cfg.Name, "tool", lt.Name, "reason", err.Error())
 				continue
@@ -409,12 +410,8 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 		}
 
 		if u.cfg.Authorize == config.AuthorizeUlgen {
-			resource, verb := "tools", t.verb
-			if u.cfg.Check != nil {
-				resource, verb = u.cfg.Check.Resource, u.cfg.Check.Verb
-			}
 			allowed, reason, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{
-				Namespace: tenant, Api: u.cfg.API, Resource: resource, Verb: verb,
+				Namespace: tenant, Api: u.cfg.API, Resource: t.resource, Verb: t.verb,
 			})
 			if err != nil {
 				var ie *infraerrors.Error

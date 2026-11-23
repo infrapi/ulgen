@@ -30,8 +30,12 @@ upstreams:
       vault: {mount: secret, path: "mcp-gateway/grafana/{tenant}", key: token}
       header: X-Grafana-Service-Account-Token
     tenant: {inject: true}
-    # the tools exposed: regular expressions on the whole tool name (none: every tool)
-    allowed_tools: ["search_.*", "get_.*", "list_.*", "query_.*", "find_.*"]
+    # the tools exposed, first match wins: a regular expression on the whole tool name, or a rule
+    # with the resource of `api` its calls are checked on (none: every tool, resource "tools")
+    allowed_tools:
+      - {match: "query_prometheus.*|list_prometheus_.*", resource: prometheus}
+      - {match: "query_loki.*|list_loki_.*", resource: loki}
+      - {match: "search_dashboards|get_dashboard.*", resource: dashboards}
     headers_from_env:
       Authorization: MCP_GRAFANA_CALLER_AUTH   # "Bearer <mcp-grafana --server-auth-token>"
     # Or no api of its own: borrow an existing api's right, one for every call
