@@ -88,6 +88,7 @@ func echo(name string) mcp.ToolHandler {
 			"arguments":     json.RawMessage(req.Params.Arguments),
 			"authorization": h.Get("Authorization"),
 			"grafana_token": h.Get("X-Grafana-Service-Account-Token"),
+			"request_id":    h.Get("X-Request-Id"),
 		})
 		if err != nil {
 			return nil, err
@@ -670,6 +671,75 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// headers sets several headers on every request.
+type headers map[string]string
+
+func (hs headers) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	for k, v := range hs {
+		r.Header.Set(k, v)
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// /metrics counts what callers do, and a request's X-Request-Id reaches the
+// upstream and the audit log.
+func TestMetricsAndRequestID(t *testing.T) {
+	var buf syncBuffer
+	h := newHarnessWith(t, nil)
+	h.g.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
+	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:   h.ulgen.URL + "/mcp",
+		HTTPClient: &http.Client{Transport: headers{"Authorization": "Bearer alice-token", "X-Request-Id": "req-42"}},
+		MaxRetries: -1,
+	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	})
+	out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"tenant": "acme", "expr": "up"})
+	if isErr || !strings.Contains(out, `"request_id":"req-42"`) {
+		t.Errorf("the upstream must get X-Request-Id: %v %s", isErr, out)
+	}
+	callText(t, s, "grafana_delete_dashboard", map[string]any{"tenant": "globex", "uid": "x"})
+	if !strings.Contains(buf.String(), `"request_id":"req-42"`) {
+		t.Errorf("the audit log must carry the request id: %s", buf.String())
+	}
+	// a request without a token
+	resp, err := http.Post(h.ulgen.URL+"/mcp", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.g.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`ulgen_tool_calls_total{outcome="ok",tool="query_prometheus",upstream="grafana"} 1`,
+		`ulgen_tool_calls_total{outcome="refused",tool="delete_dashboard",upstream="grafana"} 1`,
+		`ulgen_tool_call_duration_seconds_count{outcome="ok",upstream="grafana"} 1`,
+		`ulgen_kayra_request_duration_seconds_count{op="check",result="ok"}`,
+		`ulgen_kayra_request_duration_seconds_count{op="check",result="denied"} 1`,
+		`ulgen_kayra_request_duration_seconds_count{op="verify",result="ok"}`,
+		`ulgen_credential_reads_total{result="ok",upstream="grafana"} 1`,
+		`ulgen_unauthenticated_requests_total{reason="no_token"} 1`,
+		`ulgen_tools_exposed{upstream="grafana"}`,
+		`ulgen_build_info{version=""} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics lacks %s", want)
+		}
+	}
 }
 
 func TestVerbOf(t *testing.T) {

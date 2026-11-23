@@ -31,6 +31,7 @@ import (
 
 	"github.com/infrapi/ulgen/internal/config"
 	"github.com/infrapi/ulgen/internal/credentials"
+	"github.com/infrapi/ulgen/internal/metrics"
 )
 
 // listTenantsTool is ulgen's own tool.
@@ -51,6 +52,7 @@ type Gateway struct {
 	// tools under their own names: one MCP server per service.
 	servers  map[string]*mcp.Server
 	log      *slog.Logger
+	metrics  *metrics.Metrics
 	toolsTTL time.Duration
 	now      func() time.Time
 
@@ -64,6 +66,9 @@ type Options struct {
 	Kayra       Kayra
 	Credentials credentials.Source // may be nil when no upstream reads Vault
 	Logger      *slog.Logger
+	// Metrics are ulgen's Prometheus collectors: a registry of their own
+	// when nil.
+	Metrics *metrics.Metrics
 	// Transport is the base transport to upstreams (tests).
 	Transport http.RoundTripper
 }
@@ -92,9 +97,14 @@ func New(cfg *config.Config, opts Options) (*Gateway, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	m := opts.Metrics
+	if m == nil {
+		m = metrics.New("")
+	}
 	g := &Gateway{
 		cfg:      cfg,
-		kayra:    opts.Kayra,
+		kayra:    instrumentedKayra{Kayra: opts.Kayra, m: m},
+		metrics:  m,
 		creds:    opts.Credentials,
 		log:      log,
 		toolsTTL: config.Duration(cfg.ToolsTTL, 5*time.Minute),
@@ -136,6 +146,9 @@ func (g *Gateway) newServer(name, intro string, ups []*upstream) *mcp.Server {
 	return srv
 }
 
+// MetricsHandler serves ulgen's Prometheus metrics.
+func (g *Gateway) MetricsHandler() http.Handler { return g.metrics.Handler() }
+
 // Close ends the upstream sessions.
 func (g *Gateway) Close() {
 	for _, u := range g.upstreams {
@@ -170,6 +183,7 @@ func (g *Gateway) Handler() http.Handler {
 			// token: a gateway's health check and UI, no user behind them. The
 			// tool list is the same for everyone; calling a tool takes a token.
 			if !g.cfg.AnonymousListing {
+				g.metrics.Unauthenticated.WithLabelValues("no_token").Inc()
 				unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
 				return
 			}
@@ -180,7 +194,8 @@ func (g *Gateway) Handler() http.Handler {
 				mcpHandler.ServeHTTP(w, r)
 				return
 			}
-			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path)
+			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path, "request_id", r.Header.Get(requestIDHeader))
+			g.metrics.Unauthenticated.WithLabelValues("no_token").Inc()
 			unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
 			return
 		}
@@ -188,7 +203,8 @@ func (g *Gateway) Handler() http.Handler {
 		if err != nil {
 			var ie *infraerrors.Error
 			if errors.As(err, &ie) && ie.Code == http.StatusUnauthorized {
-				g.log.Warn("refusing a caller: Kayra refused the token", "path", r.URL.Path, "error", err)
+				g.log.Warn("refusing a caller: Kayra refused the token", "path", r.URL.Path, "request_id", r.Header.Get(requestIDHeader), "error", err)
+				g.metrics.Unauthenticated.WithLabelValues("refused_token").Inc()
 				unauthorized(w, g.cfg.ResourceMetadata, "the token was refused")
 				return
 			}
@@ -197,6 +213,9 @@ func (g *Gateway) Handler() http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), tokenKey{}, tok)
+		if id := strings.TrimSpace(r.Header.Get(requestIDHeader)); id != "" {
+			ctx = context.WithValue(ctx, requestIDKey{}, id)
+		}
 		if user != nil {
 			ctx = context.WithValue(ctx, callerKey{}, user.Subject)
 		}
@@ -304,6 +323,7 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 		listed, err := u.client.listTools(ctx, headers)
 		if err != nil {
 			g.log.Warn("listing an upstream's tools", "upstream", u.cfg.Name, "error", err)
+			g.metrics.ListErrors.WithLabelValues(u.cfg.Name).Inc()
 			for name, t := range g.tools {
 				if t.upstream == u {
 					next[name] = t
@@ -311,6 +331,7 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 			}
 			continue
 		}
+		exposed := 0
 		for _, lt := range listed {
 			rule, ok := u.cfg.ToolRule(lt.Name)
 			if !ok {
@@ -322,7 +343,9 @@ func (g *Gateway) refresh(ctx context.Context, force bool) {
 				continue
 			}
 			next[t.exposed.Name] = t
+			exposed++
 		}
+		g.metrics.ToolsExposed.WithLabelValues(u.cfg.Name).Set(float64(exposed))
 	}
 
 	// The aggregate: every tool under its prefixed name; each upstream's
@@ -387,8 +410,11 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			case res != nil && res.IsError:
 				outcome = "tool_error"
 			}
+			elapsed := g.now().Sub(start)
 			g.log.Info("tool call", "user", caller(ctx), "upstream", u.cfg.Name, "tool", t.original,
-				"tenant", tenant, "outcome", outcome, "duration_ms", g.now().Sub(start).Milliseconds())
+				"tenant", tenant, "outcome", outcome, "duration_ms", elapsed.Milliseconds(), "request_id", requestID(ctx))
+			g.metrics.ToolCalls.WithLabelValues(u.cfg.Name, t.original, outcome).Inc()
+			g.metrics.ToolCallDuration.WithLabelValues(u.cfg.Name, outcome).Observe(elapsed.Seconds())
 		}()
 		args := map[string]any{}
 		if len(req.Params.Arguments) > 0 {
@@ -430,6 +456,7 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			headers.Set("Authorization", "Bearer "+tok)
 		case u.cfg.Credential.Vault != nil:
 			cred, err := g.creds.Credential(ctx, *u.cfg.Credential.Vault, tenant)
+			g.metrics.CredentialReads.WithLabelValues(u.cfg.Name, okOrError(err)).Inc()
 			if err != nil {
 				g.log.Error("reading a tenant credential", "upstream", u.cfg.Name, "tenant", tenant, "error", err)
 				return toolError("%s is not set up for tenant %q yet", u.cfg.Name, tenant), nil
@@ -437,6 +464,9 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 			headers.Set(u.cfg.Credential.Header, u.cfg.Credential.Prefix+cred)
 		}
 
+		if id := requestID(ctx); id != "" {
+			headers.Set(requestIDHeader, id) // the upstream (its logs, the APIs behind it) sees the same id
+		}
 		out, err := u.client.callTool(ctx, headers, t.original, args)
 		if err != nil {
 			g.log.Error("calling an upstream tool", "upstream", u.cfg.Name, "tool", t.original, "error", err)
