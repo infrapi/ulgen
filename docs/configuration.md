@@ -1,70 +1,40 @@
 ---
 title: Configuration
-description: Every key of ulgen's YAML configuration file, with its default.
+description: Every setting of ulgen, infrapi/lib's INFRAPI_APP_* and its own INFRAPI_ULGEN_*, with its default.
 weight: 70
 ---
 
 # Configuration
 
 ```bash
-ulgen -config /etc/ulgen/ulgen.yaml
+INFRAPI_CONFIG_DOTENV_FILE=/etc/ulgen/ulgen.env ulgen
 ulgen -version
 ```
 
-ulgen reads one YAML file. A key that does not exist is an error, as is a
-missing required value: ulgen refuses to start and names it. A commented
-example is in
-[`ulgen.example.yaml`](https://github.com/infrapi/ulgen/blob/main/ulgen.example.yaml).
+ulgen reads one dotenv file, the one `INFRAPI_CONFIG_DOTENV_FILE` names
+(`.env` when unset), never the process environment. A missing or invalid
+setting stops it, naming the key and the file. A commented example is
+[`ulgen.env.example`](https://github.com/infrapi/ulgen/blob/main/ulgen.env.example).
 
-## Server
+## infrapi/lib's
 
-| Key | Default | |
-|---|---|---|
-| `listen` | `:8080` | the listen address |
-| `path` | `/mcp` | the MCP endpoint; `<path>/<upstream>` serves one upstream |
-| `tls.cert_file`, `tls.key_file` | | HTTPS, with PEM files re-read when they change ([Callers](callers.md#tls)) |
-| `token_header` | `Authorization` | the header carrying the caller's Kayra token |
-| `resource_metadata` | | the protected resource metadata URL a 401 names (RFC 9728) |
-| `anonymous_listing` | `false` | the handshake and `tools/list` without a token ([Callers](callers.md#anonymous-listing)) |
-| `list_token_file` | | a Kayra token of ulgen's own, to list passthrough upstreams without a caller |
-| `tools_ttl` | `5m` | how long the upstreams' tools are kept before they are listed again |
-| `credential_ttl` | `1m` | how long a credential read from Vault is kept |
+`INFRAPI_APP_*`, as for every infrapi/lib service: the name, platform,
+region, listen address, logs, CORS... See lib's
+[config](https://infrapi.github.io/lib/packages/config/). For ulgen:
 
-## kayra
+| Key | |
+|---|---|
+| `INFRAPI_APP_URL` | where MCP clients reach ulgen, the gateway: the resource their tokens are for, what a 401 names |
+| `INFRAPI_APP_LISTEN_ADDRESS` | `127.0.0.1:9700` behind a gateway on the same host |
+
+## ulgen's
 
 | Key | Default | |
 |---|---|---|
-| `kayra.url` | required | Kayra's base URL: userinfo, `/check`, the caller's namespaces |
-| `kayra.cache_ttl` | `1m` | how long a caller's resolution is cached; `/check` never is |
-
-## vault
-
-Required when an upstream reads its credential from Vault.
-
-| Key | Default | |
-|---|---|---|
-| `vault.address` | required | |
-| `vault.role_id_env` | required | the environment variable holding the AppRole role id |
-| `vault.secret_id_file` | required | the file holding the secret id, re-read at each login |
-| `vault.approle_mount` | `approle` | |
-| `vault.ca_cert_path` | | a CA bundle for Vault's certificate |
-
-## upstreams
-
-| Key | Default | |
-|---|---|---|
-| `name` | required | lowercase letters, digits and dashes; prefixes its tools (`<name>_<tool>`) |
-| `url` | required | its Streamable HTTP endpoint |
-| `api` | | the Kayra api its calls are checked on (`authorize: ulgen`), or the api it is registered as (`list_namespaces`) |
-| `version` | `v1` | the api's version, for its OpenAPI document |
-| `authorize` | required | `ulgen` or `upstream` ([Authorization](authorization.md)) |
-| `check` | | `{resource, verb}`: the one right every call needs, borrowed from an existing api |
-| `namespace_check` | see [list_namespaces](tools.md#list_namespaces) | `{resource, verb}`: where `list_namespaces` says the upstream is usable |
-| `credential.passthrough` | | the caller's token ([Credentials](credentials.md)) |
-| `credential.vault` | | `{mount, path, key}`, `{namespace}` in `path`: the namespace's credential |
-| `credential.header`, `credential.prefix` | | where the Vault credential is sent, and what precedes it |
-| `namespace.inject` | | add a `namespace` argument to every tool ([Tools and namespaces](tools.md#namespaces)) |
-| `namespace.argument` | | the upstream's own namespace argument, exposed as `namespace` |
-| `allowed_tools` | every tool | regular expressions, or `{match, resource, verb}` rules ([Tools and namespaces](tools.md#allowed_tools)) |
-| `headers_from_env` | | headers sent on every request, from environment variables |
-| `protocol_version` | `2025-06-18` | the MCP protocol version of ulgen's session with it |
+| `INFRAPI_ULGEN_API` | required | ulgen's own API group: its endpoints are under `/apis/<api>/v1`, the MCP endpoint `/apis/<api>/v1/-/mcp`. Never served as one of the APIs |
+| `INFRAPI_ULGEN_AUTH_URL` | required | Kayra's URL: the callers, the APIs, the namespaces |
+| `INFRAPI_ULGEN_AUTH_CACHE_TTL` | `1m` | how long a caller's identity is kept |
+| `INFRAPI_ULGEN_GATEWAY_URL` | `INFRAPI_ULGEN_AUTH_URL` | where the APIs are reached: `<gateway>/apis/<api>/<version>/-/mcp` |
+| `INFRAPI_ULGEN_APIS_INCLUDE` | every API | a regular expression on an API's whole name: the APIs served |
+| `INFRAPI_ULGEN_APIS_EXCLUDE` | none | a regular expression on an API's whole name: the APIs left out |
+| `INFRAPI_ULGEN_TOOLS_TTL` | `5m` | how long the APIs and their tools are kept before they are listed again |

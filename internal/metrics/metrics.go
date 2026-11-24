@@ -1,82 +1,55 @@
-// Package metrics is ulgen's Prometheus metrics, served at /metrics: what
-// callers do (tool calls by upstream, tool and outcome, their durations),
-// what ulgen asks Kayra and Vault, and the tools it exposes.
+// Package metrics is ulgen's Prometheus metrics: what callers do (tool
+// calls by API, tool and outcome, their durations), what ulgen asks Kayra,
+// and the tools it serves. Registered on the registerer New is given, the
+// default one in ulgen: infrapi/lib serves it at <root>/-/metrics, with the
+// HTTP requests' and the Go runtime's.
 package metrics
 
 import (
-	"net/http"
-
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics holds ulgen's collectors, on a registry of its own.
+// Metrics holds ulgen's collectors.
 type Metrics struct {
-	registry *prometheus.Registry
-
-	// ToolCalls counts tool calls: upstream, tool (the upstream's name),
-	// outcome (ok, refused, tool_error, error), as the audit log says them.
+	// ToolCalls counts tool calls: api, tool (the API's own name), outcome
+	// (ok, tool_error, error), as the audit log says them.
 	ToolCalls *prometheus.CounterVec
-	// ToolCallDuration is a call's duration, checks and credential included.
+	// ToolCallDuration is a call's duration.
 	ToolCallDuration *prometheus.HistogramVec
-	// Kayra times ulgen's requests to Kayra: op (verify, check,
-	// namespaces), result (ok, denied, refused, error).
+	// Kayra times ulgen's requests to Kayra: op (apis, namespaces), result
+	// (ok, refused, error).
 	Kayra *prometheus.HistogramVec
-	// CredentialReads counts namespace credential reads: upstream, result
-	// (ok, error).
-	CredentialReads *prometheus.CounterVec
-	// Unauthenticated counts requests refused before any tool: reason
-	// (no_token, refused_token).
-	Unauthenticated *prometheus.CounterVec
-	// ToolsExposed is the number of tools exposed per upstream, as last
-	// listed.
-	ToolsExposed *prometheus.GaugeVec
-	// ListErrors counts the failed listings of an upstream's tools.
+	// ToolsServed is the number of tools served per API, as last listed.
+	ToolsServed *prometheus.GaugeVec
+	// ListErrors counts the failed listings of an API's tools.
 	ListErrors *prometheus.CounterVec
 }
 
-// New registers ulgen's collectors, the Go runtime's and the process's,
-// and ulgen_build_info{version}.
-func New(version string) *Metrics {
-	reg := prometheus.NewRegistry()
+// New registers ulgen's collectors on reg, and ulgen_build_info{version}.
+func New(reg prometheus.Registerer, version string) *Metrics {
 	m := &Metrics{
-		registry: reg,
 		ToolCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ulgen_tool_calls_total", Help: "Tool calls, by upstream, tool and outcome.",
-		}, []string{"upstream", "tool", "outcome"}),
+			Name: "ulgen_tool_calls_total", Help: "Tool calls, by API, tool and outcome.",
+		}, []string{"api", "tool", "outcome"}),
 		ToolCallDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "ulgen_tool_call_duration_seconds", Help: "Tool call duration, by upstream and outcome.",
+			Name: "ulgen_tool_call_duration_seconds", Help: "Tool call duration, by API and outcome.",
 			Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
-		}, []string{"upstream", "outcome"}),
+		}, []string{"api", "outcome"}),
 		Kayra: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "ulgen_kayra_request_duration_seconds", Help: "Requests to Kayra, by op (verify, check, namespaces) and result.",
+			Name: "ulgen_kayra_request_duration_seconds", Help: "Requests to Kayra, by op (apis, namespaces) and result.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"op", "result"}),
-		CredentialReads: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ulgen_credential_reads_total", Help: "Namespace credential reads (Vault, cached), by upstream and result.",
-		}, []string{"upstream", "result"}),
-		Unauthenticated: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ulgen_unauthenticated_requests_total", Help: "Requests refused for want of a valid token, by reason.",
-		}, []string{"reason"}),
-		ToolsExposed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "ulgen_tools_exposed", Help: "Tools exposed, by upstream, as last listed.",
-		}, []string{"upstream"}),
+		ToolsServed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ulgen_tools_served", Help: "Tools served, by API, as last listed.",
+		}, []string{"api"}),
 		ListErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ulgen_tools_list_errors_total", Help: "Failed listings of an upstream's tools.",
-		}, []string{"upstream"}),
+			Name: "ulgen_tools_list_errors_total", Help: "Failed listings of an API's tools.",
+		}, []string{"api"}),
 	}
 	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ulgen_build_info", Help: "ulgen's version, value 1.",
 	}, []string{"version"})
 	build.WithLabelValues(version).Set(1)
-	reg.MustRegister(m.ToolCalls, m.ToolCallDuration, m.Kayra, m.CredentialReads, m.Unauthenticated,
-		m.ToolsExposed, m.ListErrors, build,
-		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	reg.MustRegister(m.ToolCalls, m.ToolCallDuration, m.Kayra, m.ToolsServed, m.ListErrors, build)
 	return m
-}
-
-// Handler serves the metrics, Prometheus' text format.
-func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }

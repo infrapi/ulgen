@@ -1,43 +1,45 @@
-// Command ulgen serves the ulgen MCP gateway: see internal/gateway.
+// Command ulgen serves one MCP endpoint in front of the platform's APIs:
+// see internal/gateway. Its settings come from the dotenv file
+// INFRAPI_CONFIG_DOTENV_FILE names (internal/config).
 //
-//	ulgen -config /etc/ulgen/ulgen.yaml
+//	INFRAPI_CONFIG_DOTENV_FILE=/etc/ulgen/ulgen.env ulgen
 package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/infrapi/lib/pkg/auth"
+	"github.com/infrapi/lib/pkg/listener"
+	"github.com/infrapi/lib/pkg/logger"
+	"github.com/infrapi/lib/pkg/server"
 
 	"github.com/infrapi/ulgen/internal/config"
-	"github.com/infrapi/ulgen/internal/credentials"
 	"github.com/infrapi/ulgen/internal/gateway"
+	"github.com/infrapi/ulgen/internal/kayra"
 	"github.com/infrapi/ulgen/internal/metrics"
-	"github.com/infrapi/ulgen/internal/tlsfile"
 )
-
-func main() {
-	if err := run(); err != nil {
-		slog.Error("ulgen stopped", "error", err)
-		os.Exit(1)
-	}
-}
 
 // version is set at build time: -ldflags "-X main.version=...".
 var version = "dev"
 
-func run() error {
-	path := flag.String("config", "ulgen.yaml", "configuration file")
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "ulgen:", err)
+		os.Exit(1)
+	}
+}
+
+func run() (err error) {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -45,66 +47,57 @@ func run() error {
 		return err
 	}
 
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	slog.SetDefault(log)
-
-	cfg, err := config.Load(*path)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	log, err := logger.New(logger.Options{Level: cfg.App.AppLogLevel.String(), Format: cfg.App.AppLogFormat})
+	if err != nil {
+		return err
+	}
+	logger.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	authClient, err := auth.NewClient(auth.ClientOptions{BaseURL: cfg.Kayra.URL, CacheTTL: config.Duration(cfg.Kayra.CacheTTL, time.Minute)})
+	client, err := auth.NewClient(auth.ClientOptions{BaseURL: cfg.AuthURL, CacheTTL: cfg.AuthCacheTTL, PublicURL: cfg.App.AppUrl})
 	if err != nil {
 		return err
 	}
-	opts := gateway.Options{Kayra: gateway.NewKayraClient(authClient, cfg.Kayra.URL, nil), Logger: log, Metrics: metrics.New(version)}
-	if cfg.Vault != nil {
-		vc, err := credentials.Login(ctx, cfg.Vault)
-		if err != nil {
-			return err
-		}
-		opts.Credentials = credentials.NewVault(vc, config.Duration(cfg.CredentialTTL, time.Minute))
-	}
-
-	g, err := gateway.New(cfg, opts)
+	root := cfg.Root()
+	// a 401 names <root>/-/oauth-protected-resource: an MCP client logs in at
+	// Kayra from there
+	engine, err := server.NewServerGin(cfg.App, []string{root}, server.WithProtectedResource(client.AuthorizationServer))
 	if err != nil {
 		return err
 	}
-	defer g.Close()
-
-	mux := http.NewServeMux()
-	mcpHandler := g.Handler()
-	mux.Handle(cfg.Path, mcpHandler)
-	mux.Handle(strings.TrimRight(cfg.Path, "/")+"/", mcpHandler) // <path>/<upstream>
-	mux.Handle("/apis/", g.SpecHandler())
-	// Prometheus metrics: for a collector on the node (ulgen listens on the
-	// loopback behind its proxy, which routes no /metrics)
-	mux.Handle("/metrics", g.MetricsHandler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	g := gateway.New(gateway.Options{
+		Catalog:    kayra.New(client, cfg.AuthURL, 30*time.Second),
+		GatewayURL: cfg.GatewayURL,
+		Serves:     cfg.Serves,
+		ToolsTTL:   cfg.ToolsTTL,
+		Logger:     log,
+		Metrics:    metrics.New(prometheus.DefaultRegisterer, version),
 	})
+	defer g.Close()
+	// under <root>/-/, open unless a route says otherwise: these need a token
+	engine.Any(root+server.MCPPath, client.Middleware(), g.Serve)
+	engine.Any(root+server.MCPPath+"/:api", client.Middleware(), g.Serve)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	serve := srv.ListenAndServe
-	if cfg.TLS != nil {
-		certs, err := tlsfile.New(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			return err
-		}
-		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: certs.GetCertificate}
-		serve = func() error { return srv.ListenAndServeTLS("", "") }
+	socket, err := listener.Listen(cfg.App)
+	if err != nil {
+		return err
 	}
-	errc := make(chan error, 1)
+	srv := &http.Server{Handler: engine, ReadHeaderTimeout: 10 * time.Second}
+	served := make(chan error, 1)
 	go func() {
-		log.Info("ulgen listening", "version", version, "address", cfg.Listen, "tls", cfg.TLS != nil, "path", cfg.Path, "upstreams", len(cfg.Upstreams))
-		errc <- serve()
+		log.Info("listening", logger.String("version", version), logger.String("addr", socket.Addr().String()),
+			logger.String("mcp", cfg.App.AppUrl+root+server.MCPPath), logger.String("kayra", cfg.AuthURL))
+		served <- srv.Serve(socket)
 	}()
 
 	select {
-	case err := <-errc:
+	case err := <-served:
 		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve: %w", err)
 		}
@@ -113,8 +106,9 @@ func run() error {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	log.Info("stopping")
 	if err := srv.Shutdown(shutdown); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		return errors.Join(fmt.Errorf("shutdown: %w", err), srv.Close())
 	}
 	return nil
 }

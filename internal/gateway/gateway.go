@@ -1,277 +1,177 @@
-// Package gateway is ulgen: one MCP server aggregating several upstream
-// MCP servers, each tool taking a "namespace", a Kayra namespace. For every
-// call, ulgen makes sure the caller may act in that namespace — asking
-// Kayra's /check itself, or leaving it to an upstream that asks with the
-// caller's own token — then calls the upstream with the right credential:
-// the caller's token, or the namespace's own credential read from Vault.
-//
-// Tools are discovered from the upstreams. allowed_tools decides which are
-// exposed, and the resource /check is asked about per tool family; the verb
-// comes from each tool's MCP annotations unless a rule sets it.
+// Package gateway is ulgen: one MCP endpoint in front of the platform's
+// APIs, each of which serves its own (infrapi/lib's mcp, at <root>/-/mcp).
+// The APIs are found in Kayra's catalog, with the caller's token; every
+// call goes to its API with the caller's token, and the API checks it, as
+// for any of its routes. ulgen adds list_namespaces, the caller's
+// namespaces, an audit line per call and metrics.
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/infrapi/lib/pkg/auth"
-	infraerrors "github.com/infrapi/lib/pkg/errors"
+	"github.com/gin-gonic/gin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/infrapi/ulgen/internal/config"
-	"github.com/infrapi/ulgen/internal/credentials"
+	"github.com/infrapi/lib/pkg/auth"
+	infraerrors "github.com/infrapi/lib/pkg/errors"
+	"github.com/infrapi/lib/pkg/logger"
+	"github.com/infrapi/lib/pkg/server"
+
+	"github.com/infrapi/ulgen/internal/kayra"
 	"github.com/infrapi/ulgen/internal/metrics"
 )
 
 // listNamespacesTool is ulgen's own tool.
 const listNamespacesTool = "list_namespaces"
 
-type upstream struct {
-	cfg    config.Upstream
+// protocolVersion is the MCP version of ulgen's sessions with the APIs:
+// newer ones are refused by stateful servers.
+const protocolVersion = "2025-06-18"
+
+// Catalog is what ulgen asks Kayra, as the caller.
+type Catalog interface {
+	APIs(ctx context.Context, token string, serves func(name string) bool) ([]kayra.API, error)
+	Namespaces(ctx context.Context, token string) ([]string, error)
+}
+
+// api is an API ulgen serves the tools of.
+type api struct {
+	kayra.API
 	client *upstreamClient
+}
+
+// Options are the Gateway's settings and dependencies.
+type Options struct {
+	Catalog Catalog
+	// GatewayURL is where the APIs are reached.
+	GatewayURL string
+	// Serves selects the APIs by name.
+	Serves func(name string) bool
+	// ToolsTTL is how long the APIs and their tools are kept.
+	ToolsTTL time.Duration
+	Logger   *logger.Logger
+	Metrics  *metrics.Metrics
+	// Transport is the base transport to the APIs (tests).
+	Transport http.RoundTripper
 }
 
 // Gateway is the ulgen MCP server.
 type Gateway struct {
-	cfg       *config.Config
-	kayra     Kayra
-	creds     credentials.Source
-	upstreams []*upstream
-	// servers: "" is the aggregate (every upstream, tools "<upstream>_<tool>"), then one per upstream, its
-	// tools under their own names: one MCP server per service.
-	servers  map[string]*mcp.Server
-	log      *slog.Logger
-	metrics  *metrics.Metrics
-	toolsTTL time.Duration
-	now      func() time.Time
+	opts    Options
+	handler http.Handler
+	now     func() time.Time
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// servers: "" is the aggregate (every API, tools <short>_<tool>), then
+	// one per API, by its short name, its tools under their own names.
+	servers   map[string]*mcp.Server
+	apis      map[string]*api // by name
 	tools     map[string]*tool
 	refreshed time.Time
 }
 
-// Options are Gateway's dependencies.
-type Options struct {
-	Kayra       Kayra
-	Credentials credentials.Source // may be nil when no upstream reads Vault
-	Logger      *slog.Logger
-	// Metrics are ulgen's Prometheus collectors: a registry of their own
-	// when nil.
-	Metrics *metrics.Metrics
-	// Transport is the base transport to upstreams (tests).
-	Transport http.RoundTripper
-}
-
-type tokenKey struct{}
-
 type callerKey struct{}
 
-// caller is the caller's Kayra user id, set by Handler: the audit log's.
-func caller(ctx context.Context) string {
-	c, _ := ctx.Value(callerKey{}).(string)
+// caller is what a request's context carries of its caller.
+type caller struct {
+	token, user, traceparent string
+}
+
+func callerOf(ctx context.Context) caller {
+	c, _ := ctx.Value(callerKey{}).(caller)
 	return c
 }
 
-// token is the caller's bearer token, set by Handler.
-func token(ctx context.Context) string {
-	t, _ := ctx.Value(tokenKey{}).(string)
-	return t
-}
-
-// New builds the gateway. Upstreams are listed lazily, on the first
-// tools/list (with that caller's token, which an upstream such as an
-// infrapi/lib MCP requires to list anything).
-func New(cfg *config.Config, opts Options) (*Gateway, error) {
-	log := opts.Logger
-	if log == nil {
-		log = slog.Default()
+// New builds the gateway. The APIs are listed on the first tools/list, with
+// that caller's token.
+func New(opts Options) *Gateway {
+	if opts.Serves == nil {
+		opts.Serves = func(string) bool { return true }
 	}
-	m := opts.Metrics
-	if m == nil {
-		m = metrics.New("")
-	}
-	g := &Gateway{
-		cfg:      cfg,
-		kayra:    instrumentedKayra{Kayra: opts.Kayra, m: m},
-		metrics:  m,
-		creds:    opts.Credentials,
-		log:      log,
-		toolsTTL: config.Duration(cfg.ToolsTTL, 5*time.Minute),
-		now:      time.Now,
-		tools:    map[string]*tool{},
-	}
-	for _, uc := range cfg.Upstreams {
-		static := http.Header{}
-		for header, env := range uc.HeadersFromEnv {
-			static.Set(header, os.Getenv(env))
-		}
-		if uc.Credential.Vault != nil && g.creds == nil {
-			return nil, fmt.Errorf("gateway: upstream %s reads vault, but no credential source is set", uc.Name)
-		}
-		g.upstreams = append(g.upstreams, &upstream{cfg: uc, client: newUpstreamClient(uc.URL, uc.ProtocolVersion, static, opts.Transport, log)})
-	}
-
+	g := &Gateway{opts: opts, now: time.Now, apis: map[string]*api{}, tools: map[string]*tool{}}
 	g.servers = map[string]*mcp.Server{"": g.newServer("ulgen",
-		"Tools of several services, each prefixed by its service.", g.upstreams)}
-	for _, u := range g.upstreams {
-		g.servers[u.cfg.Name] = g.newServer("ulgen-"+u.cfg.Name, "Tools of "+u.cfg.Name+".", []*upstream{u})
-	}
-	return g, nil
+		"Tools of the platform's APIs, each prefixed by its API's short name.")}
+	g.handler = mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.servers[serverName(r.Context())] // nil: 404
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	return g
 }
 
-// newServer is one MCP server of ulgen, with list_namespaces over ups.
-func (g *Gateway) newServer(name, intro string, ups []*upstream) *mcp.Server {
+type serverKey struct{}
+
+func serverName(ctx context.Context) string {
+	s, _ := ctx.Value(serverKey{}).(string)
+	return s
+}
+
+// newServer is one MCP server of ulgen, with list_namespaces.
+func (g *Gateway) newServer(name, intro string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: name, Version: "v1"}, &mcp.ServerOptions{
-		Instructions: intro + " A tool acting on a namespace takes a `namespace` argument: call " + listNamespacesTool +
+		Instructions: intro + " A tool acting in a namespace takes a `namespace` argument: call " + listNamespacesTool +
 			" first to know the namespaces you belong to, and ask the user which one when there are several.",
 	})
 	srv.AddTool(&mcp.Tool{
 		Name:        listNamespacesTool,
-		Description: "List the namespaces (Kayra namespaces) you are in, with the services usable in each.",
+		Description: "List the Kayra namespaces you belong to.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, g.listNamespaces(ups))
+	}, g.listNamespaces)
 	srv.AddReceivingMiddleware(g.refreshOnList)
 	return srv
 }
 
-// MetricsHandler serves ulgen's Prometheus metrics.
-func (g *Gateway) MetricsHandler() http.Handler { return g.metrics.Handler() }
+// Serve is the MCP endpoints' handler, <root>/-/mcp for every API and
+// <root>/-/mcp/<short> for one, behind auth.Client.Middleware: the caller's
+// token, verified, goes to the APIs.
+func (g *Gateway) Serve(c *gin.Context) {
+	name := c.Param("api")
+	if name != "" {
+		g.mu.Lock()
+		_, ok := g.servers[name]
+		never := g.refreshed.IsZero()
+		g.mu.Unlock()
+		if !ok && never {
+			// right after a start: the per-API endpoints come with the first listing
+			g.refresh(g.withCaller(c), false)
+		}
+	}
+	ctx := context.WithValue(g.withCaller(c), serverKey{}, name)
+	g.handler.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
+}
 
-// Close ends the upstream sessions.
+// withCaller is the request's context, with its caller.
+func (g *Gateway) withCaller(c *gin.Context) context.Context {
+	token, _ := strings.CutPrefix(strings.TrimSpace(c.GetHeader("Authorization")), "Bearer ")
+	cl := caller{token: strings.TrimSpace(token), traceparent: c.GetHeader("Traceparent")}
+	if u, ok := auth.GetUser(c); ok {
+		cl.user = u.Subject
+	}
+	return context.WithValue(c.Request.Context(), callerKey{}, cl)
+}
+
+// Close ends the sessions with the APIs.
 func (g *Gateway) Close() {
-	for _, u := range g.upstreams {
-		u.client.close()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, a := range g.apis {
+		a.client.close()
 	}
 }
 
-// Handler serves MCP (Streamable HTTP, stateless) behind bearer
-// authentication: every request carries a token Kayra resolves, in
-// token_header (Authorization by default). The
-// configured path serves every upstream, <path>/<upstream> one of them.
-func (g *Gateway) Handler() http.Handler {
-	base := strings.TrimRight(g.cfg.Path, "/")
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		name := strings.Trim(strings.TrimPrefix(r.URL.Path, base), "/")
-		return g.servers[name] // nil: 404
-	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name := strings.Trim(strings.TrimPrefix(r.URL.Path, base), "/")
-		if _, ok := g.servers[name]; !ok || !strings.HasPrefix(r.URL.Path, base) {
-			http.NotFound(w, r)
-			return
-		}
-		raw := strings.TrimSpace(r.Header.Get(g.cfg.TokenHeader))
-		tok, ok := strings.CutPrefix(raw, "Bearer ")
-		if !ok && !strings.EqualFold(g.cfg.TokenHeader, "Authorization") {
-			tok, ok = raw, raw != "" // a dedicated header may carry the bare token
-		}
-		tok = strings.TrimSpace(tok)
-		if !ok || tok == "" {
-			// With anonymous_listing, the MCP handshake and tools/list without a
-			// token: a gateway's health check and UI, no user behind them. The
-			// tool list is the same for everyone; calling a tool takes a token.
-			if !g.cfg.AnonymousListing {
-				g.metrics.Unauthenticated.WithLabelValues("no_token").Inc()
-				unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
-				return
-			}
-			if handshake, err := isHandshake(r); err != nil {
-				http.Error(w, "unreadable request", http.StatusBadRequest)
-				return
-			} else if handshake {
-				mcpHandler.ServeHTTP(w, r)
-				return
-			}
-			g.log.Warn("refusing a caller without a bearer token", "path", r.URL.Path, "request_id", r.Header.Get(requestIDHeader))
-			g.metrics.Unauthenticated.WithLabelValues("no_token").Inc()
-			unauthorized(w, g.cfg.ResourceMetadata, "a bearer token is required")
-			return
-		}
-		user, err := g.kayra.Verify(r.Context(), tok)
-		if err != nil {
-			var ie *infraerrors.Error
-			if errors.As(err, &ie) && ie.Code == http.StatusUnauthorized {
-				g.log.Warn("refusing a caller: Kayra refused the token", "path", r.URL.Path, "request_id", r.Header.Get(requestIDHeader), "error", err)
-				g.metrics.Unauthenticated.WithLabelValues("refused_token").Inc()
-				unauthorized(w, g.cfg.ResourceMetadata, "the token was refused")
-				return
-			}
-			g.log.Error("verifying a caller", "error", err)
-			http.Error(w, "the authorization service is unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		ctx := context.WithValue(r.Context(), tokenKey{}, tok)
-		if id := strings.TrimSpace(r.Header.Get(requestIDHeader)); id != "" {
-			ctx = context.WithValue(ctx, requestIDKey{}, id)
-		}
-		if user != nil {
-			ctx = context.WithValue(ctx, callerKey{}, user.Subject)
-		}
-		mcpHandler.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// handshakeMethods are the JSON-RPC messages served without a token.
-var handshakeMethods = map[string]bool{
-	"initialize": true, "notifications/initialized": true, "ping": true, "tools/list": true,
-}
-
-// maxHandshakeBody bounds what is read of a request without a token.
-const maxHandshakeBody = 64 << 10
-
-// isHandshake tells whether r is a POST of one handshake message, leaving
-// its body readable again.
-func isHandshake(r *http.Request) (bool, error) {
-	if r.Method != http.MethodPost || r.Body == nil {
-		return false, nil
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxHandshakeBody+1))
-	if err != nil {
-		return false, err
-	}
-	if cerr := r.Body.Close(); cerr != nil {
-		return false, cerr
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	if len(body) > maxHandshakeBody {
-		return false, nil
-	}
-	var msg struct {
-		Method string `json:"method"`
-	}
-	if json.Unmarshal(body, &msg) != nil { // a batch, or not JSON: not a handshake
-		return false, nil
-	}
-	return handshakeMethods[msg.Method], nil
-}
-
-// unauthorized answers 401, its challenge naming the resource metadata when
-// set (RFC 9728): an MCP client learns there where to log in.
-func unauthorized(w http.ResponseWriter, resourceMetadata, msg string) {
-	challenge := `Bearer realm="ulgen"`
-	if resourceMetadata != "" {
-		challenge = fmt.Sprintf(`Bearer resource_metadata=%q`, resourceMetadata)
-	}
-	w.Header().Set("WWW-Authenticate", challenge)
-	http.Error(w, msg, http.StatusUnauthorized)
-}
-
-// refreshOnList refreshes the aggregated tools before answering a
+// refreshOnList refreshes the APIs and their tools before answering a
 // tools/list, at most every ToolsTTL, and before a tools/call when they
-// were never listed (a client calls from its own cached list,
-// right after ulgen restarted).
+// were never listed (a client calling from its own list, right after ulgen
+// restarted).
 func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 		switch method {
@@ -289,132 +189,147 @@ func (g *Gateway) refreshOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-// refresh lists every upstream and replaces the tools ulgen exposes. An
-// upstream that fails to list keeps its previous tools.
+// result labels an answer of Kayra: ok, refused (4xx), error.
+func result(err error) string {
+	code := infraerrors.ErrorCode(err)
+	switch {
+	case err == nil:
+		return "ok"
+	case code >= http.StatusBadRequest && code < http.StatusInternalServerError:
+		return "refused"
+	default:
+		return "error"
+	}
+}
+
+// refresh asks Kayra for the APIs, lists their tools and replaces those
+// ulgen serves. An API that fails to list keeps its previous tools; Kayra
+// failing keeps every API.
 func (g *Gateway) refresh(ctx context.Context, force bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !force && !g.refreshed.IsZero() && g.now().Sub(g.refreshed) < g.toolsTTL {
+	if !force && !g.refreshed.IsZero() && g.now().Sub(g.refreshed) < g.opts.ToolsTTL {
+		return
+	}
+	cl := callerOf(ctx)
+	log := g.opts.Logger
+
+	start := time.Now()
+	found, err := g.opts.Catalog.APIs(ctx, cl.token, g.opts.Serves)
+	g.opts.Metrics.Kayra.WithLabelValues("apis", result(err)).Observe(time.Since(start).Seconds())
+	if err != nil {
+		log.Warn("listing the platform's APIs", logger.Err(err), logger.String("request_id", server.CorrelationID(ctx)))
 		return
 	}
 
-	next := map[string]*tool{}
-	complete := true // every upstream listed: the next refresh can wait toolsTTL
-	for _, u := range g.upstreams {
-		headers := http.Header{}
-		if u.cfg.Credential.Passthrough {
-			tok := token(ctx)
-			if tok == "" {
-				tok = g.listToken()
-			}
-			if tok == "" {
-				// no caller and no list token: keep what an earlier listing found,
-				// and list again as soon as a caller's token comes
-				complete = false
-				for name, t := range g.tools {
-					if t.upstream == u {
-						next[name] = t
-					}
-				}
-				continue
-			}
-			headers.Set("Authorization", "Bearer "+tok)
+	apis := map[string]*api{}
+	for _, f := range found {
+		url := strings.TrimRight(g.opts.GatewayURL, "/") + f.Root() + server.MCPPath
+		if old, ok := g.apis[f.Name]; ok && old.client.url == url && old.Short == f.Short {
+			apis[f.Name] = old
+			continue
 		}
-		listed, err := u.client.listTools(ctx, headers)
+		apis[f.Name] = &api{API: f, client: newUpstreamClient(url, protocolVersion, nil, g.opts.Transport, log)}
+	}
+
+	next := map[string]*tool{}
+	for _, a := range apis {
+		headers := http.Header{}
+		if cl.token != "" {
+			// an API's -/mcp is open unless it says otherwise: the caller's
+			// token, for one that does
+			headers.Set("Authorization", "Bearer "+cl.token)
+		}
+		listed, err := a.client.listTools(ctx, headers)
 		if err != nil {
-			g.log.Warn("listing an upstream's tools", "upstream", u.cfg.Name, "error", err)
-			g.metrics.ListErrors.WithLabelValues(u.cfg.Name).Inc()
+			log.Warn("listing an API's tools", logger.String("api", a.Name), logger.Err(err))
+			g.opts.Metrics.ListErrors.WithLabelValues(a.Name).Inc()
 			for name, t := range g.tools {
-				if t.upstream == u {
+				if t.api.Name == a.Name {
+					t.api = a
 					next[name] = t
 				}
 			}
 			continue
 		}
-		exposed := 0
+		served := 0
 		for _, lt := range listed {
-			rule, ok := u.cfg.ToolRule(lt.Name)
-			if !ok {
-				continue // allowed_tools: not exposed
-			}
-			t, err := expose(u, lt, rule)
+			t, err := serve(a, lt)
 			if err != nil {
-				g.log.Warn("tool left out", "upstream", u.cfg.Name, "tool", lt.Name, "reason", err.Error())
+				log.Warn("tool left out", logger.String("api", a.Name), logger.String("tool", lt.Name), logger.String("reason", err.Error()))
 				continue
 			}
-			next[t.exposed.Name] = t
-			exposed++
+			if other, taken := next[t.prefixed.Name]; taken {
+				log.Warn("tool left out: its name is another API's", logger.String("api", a.Name), logger.String("tool", lt.Name),
+					logger.String("other", other.api.Name))
+				continue
+			}
+			next[t.prefixed.Name] = t
+			served++
 		}
-		g.metrics.ToolsExposed.WithLabelValues(u.cfg.Name).Set(float64(exposed))
+		g.opts.Metrics.ToolsServed.WithLabelValues(a.Name).Set(float64(served))
 	}
 
-	// The aggregate: every tool under its prefixed name; each upstream's
-	// server: its own tools under their upstream names.
+	// the APIs gone: their endpoint and session
+	for name, old := range g.apis {
+		if a, ok := apis[name]; ok && a == old {
+			continue
+		}
+		delete(g.servers, old.Short)
+		old.client.close()
+		g.opts.Metrics.ToolsServed.DeleteLabelValues(name)
+	}
+	for _, a := range apis {
+		if _, ok := g.servers[a.Short]; !ok {
+			g.servers[a.Short] = g.newServer("ulgen-"+a.Short, "Tools of "+a.Name+".")
+		}
+	}
+	agg := g.servers[""]
 	for name, old := range g.tools {
 		if _, ok := next[name]; !ok {
-			g.servers[""].RemoveTools(name)
-			if old.original != listNamespacesTool {
-				g.servers[old.upstream.cfg.Name].RemoveTools(old.original)
+			agg.RemoveTools(name)
+			if srv, ok := g.servers[old.api.Short]; ok {
+				srv.RemoveTools(old.original)
 			}
 		}
 	}
 	for _, t := range next {
-		g.servers[""].AddTool(t.exposed, g.call(t))
-		if t.original == listNamespacesTool {
-			continue // ulgen's own on that server; the upstream's stays reachable on the aggregate
+		agg.AddTool(t.prefixed, g.call(t))
+		if t.original != listNamespacesTool { // ulgen's own on that endpoint
+			g.servers[t.api.Short].AddTool(t.own(), g.call(t))
 		}
-		own := *t.exposed
-		own.Name = t.original
-		g.servers[t.upstream.cfg.Name].AddTool(&own, g.call(t))
 	}
-	g.tools = next
-	if complete {
-		g.refreshed = g.now()
-	}
+	g.apis, g.tools, g.refreshed = apis, next, g.now()
 }
 
-// listToken is list_token_file's token, "" when unset or unreadable.
-func (g *Gateway) listToken() string {
-	if g.cfg.ListTokenFile == "" {
-		return ""
-	}
-	data, err := os.ReadFile(g.cfg.ListTokenFile)
-	if err != nil {
-		g.log.Warn("reading list_token_file", "error", err)
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-// toolResult is a tool error the model can read and act on.
+// toolError is a tool error the model can read and act on.
 func toolError(format string, args ...any) *mcp.CallToolResult {
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(format, args...)}}}
 }
 
-// call is the handler of one exposed tool.
+// call is the handler of one served tool: the call, as the caller, to the
+// API, which checks it.
 func (g *Gateway) call(t *tool) mcp.ToolHandler {
-	u := t.upstream
 	return func(ctx context.Context, req *mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
-		tok := token(ctx)
-		// the audit log: one line per call, who, where, what, and how it ended
+		cl := callerOf(ctx)
+		a := t.api
 		start := g.now()
 		namespace := ""
-		reached := false // the upstream answered: an error result is the tool's, not a refusal
+		// the audit log: one line per call, who, where, what, and how it ended
 		defer func() {
 			outcome := "ok"
 			switch {
 			case err != nil:
 				outcome = "error"
-			case res != nil && res.IsError && !reached:
-				outcome = "refused"
 			case res != nil && res.IsError:
 				outcome = "tool_error"
 			}
 			elapsed := g.now().Sub(start)
-			g.log.Info("tool call", "user", caller(ctx), "upstream", u.cfg.Name, "tool", t.original,
-				"namespace", namespace, "outcome", outcome, "duration_ms", elapsed.Milliseconds(), "request_id", requestID(ctx))
-			g.metrics.ToolCalls.WithLabelValues(u.cfg.Name, t.original, outcome).Inc()
-			g.metrics.ToolCallDuration.WithLabelValues(u.cfg.Name, outcome).Observe(elapsed.Seconds())
+			g.opts.Logger.Info("tool call", logger.String("user", cl.user), logger.String("api", a.Name), logger.String("tool", t.original),
+				logger.String("namespace", namespace), logger.String("outcome", outcome), logger.Int64("duration_ms", elapsed.Milliseconds()),
+				logger.String("request_id", server.CorrelationID(ctx)))
+			g.opts.Metrics.ToolCalls.WithLabelValues(a.Name, t.original, outcome).Inc()
+			g.opts.Metrics.ToolCallDuration.WithLabelValues(a.Name, outcome).Observe(elapsed.Seconds())
 		}()
 		args := map[string]any{}
 		if len(req.Params.Arguments) > 0 {
@@ -422,118 +337,44 @@ func (g *Gateway) call(t *tool) mcp.ToolHandler {
 				return toolError("arguments must be a JSON object"), nil
 			}
 		}
+		namespace, _ = args[namespaceArg].(string)
 
-		if t.scoped {
-			namespace, _ = args[namespaceArg].(string)
-			if !credentials.ValidNamespace(namespace) {
-				return toolError("%q is required: the namespace to act in (list_namespaces gives yours)", namespaceArg), nil
-			}
-			delete(args, namespaceArg)
-			if u.cfg.Namespace.Argument != "" {
-				args[u.cfg.Namespace.Argument] = namespace
-			}
+		headers := http.Header{"Authorization": {"Bearer " + cl.token}}
+		if id := server.CorrelationID(ctx); id != "" {
+			headers.Set(server.RequestIDHeader, id) // the API's logs say the same id
 		}
-
-		if u.cfg.Authorize == config.AuthorizeUlgen {
-			allowed, reason, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{
-				Namespace: namespace, Api: u.cfg.API, Resource: t.resource, Verb: t.verb,
-			})
-			if err != nil {
-				var ie *infraerrors.Error
-				if errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500 {
-					return toolError("not allowed on namespace %q: %s", namespace, ie.Message), nil
-				}
-				return nil, fmt.Errorf("ulgen: authorization service: %w", err)
-			}
-			if !allowed {
-				return toolError("not allowed on namespace %q: %s", namespace, reason), nil
-			}
+		if cl.traceparent != "" {
+			headers.Set("Traceparent", cl.traceparent)
 		}
-
-		headers := http.Header{}
-		switch {
-		case u.cfg.Credential.Passthrough:
-			headers.Set("Authorization", "Bearer "+tok)
-		case u.cfg.Credential.Vault != nil:
-			cred, err := g.creds.Credential(ctx, *u.cfg.Credential.Vault, namespace)
-			g.metrics.CredentialReads.WithLabelValues(u.cfg.Name, okOrError(err)).Inc()
-			if err != nil {
-				g.log.Error("reading a namespace credential", "upstream", u.cfg.Name, "namespace", namespace, "error", err)
-				return toolError("%s is not set up for namespace %q yet", u.cfg.Name, namespace), nil
-			}
-			headers.Set(u.cfg.Credential.Header, u.cfg.Credential.Prefix+cred)
-		}
-
-		if id := requestID(ctx); id != "" {
-			headers.Set(requestIDHeader, id) // the upstream (its logs, the APIs behind it) sees the same id
-		}
-		out, err := u.client.callTool(ctx, headers, t.original, args)
+		out, err := a.client.callTool(ctx, headers, t.original, args)
 		if err != nil {
-			g.log.Error("calling an upstream tool", "upstream", u.cfg.Name, "tool", t.original, "error", err)
-			return nil, fmt.Errorf("ulgen: %s is unavailable", u.cfg.Name)
+			g.opts.Logger.Error("calling an API's tool", logger.String("api", a.Name), logger.String("tool", t.original), logger.Err(err))
+			return nil, fmt.Errorf("ulgen: %s is unavailable", a.Name)
 		}
-		reached = true
 		return out, nil
 	}
 }
 
-// namespaceEntry is one line of list_namespaces.
-type namespaceEntry struct {
-	Namespace string   `json:"namespace"`
-	Services  []string `json:"services"`
-}
-
-// listNamespaces answers list_namespaces over ups: the caller's namespaces
-// (Kayra), each with the upstreams of ups usable there: those whose
-// namespace_check Kayra's /check allows, and those without one. A namespace
-// where none is usable is left out.
-func (g *Gateway) listNamespaces(ups []*upstream) mcp.ToolHandler {
-	return func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return g.namespaces(ctx, ups)
-	}
-}
-
-func (g *Gateway) namespaces(ctx context.Context, ups []*upstream) (*mcp.CallToolResult, error) {
-	tok := token(ctx)
-	namespaces, err := g.kayra.Namespaces(ctx, tok)
+// listNamespaces answers list_namespaces: the caller's namespaces.
+func (g *Gateway) listNamespaces(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	start := time.Now()
+	namespaces, err := g.opts.Catalog.Namespaces(ctx, callerOf(ctx).token)
+	g.opts.Metrics.Kayra.WithLabelValues("namespaces", result(err)).Observe(time.Since(start).Seconds())
 	if err != nil {
-		g.log.Error("listing the caller's namespaces", "error", err)
+		var ie *infraerrors.Error
+		if errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500 {
+			return toolError("Kayra refused to list your namespaces: %s", ie.Message), nil
+		}
+		g.opts.Logger.Error("listing the caller's namespaces", logger.Err(err))
 		return nil, fmt.Errorf("ulgen: could not list your namespaces")
 	}
-	out := make([]namespaceEntry, 0, len(namespaces))
-	for _, ns := range namespaces {
-		var services []string
-		for _, u := range ups {
-			chk := u.cfg.NamespaceCheck
-			if chk == nil {
-				services = append(services, u.cfg.Name)
-				continue
-			}
-			allowed, _, err := g.kayra.Authorize(ctx, tok, auth.AuthorizeRequest{Namespace: ns, Api: u.cfg.API, Resource: chk.Resource, Verb: chk.Verb})
-			var ie *infraerrors.Error
-			switch {
-			case err == nil && allowed:
-				services = append(services, u.cfg.Name)
-			case err == nil, errors.As(err, &ie) && ie.Code >= 400 && ie.Code < 500:
-				// not subscribed, no role: not usable there
-			default:
-				g.log.Error("checking a namespace", "namespace", ns, "upstream", u.cfg.Name, "error", err)
-				return nil, fmt.Errorf("ulgen: could not list your namespaces")
-			}
-		}
-		if len(services) > 0 {
-			sort.Strings(services)
-			out = append(out, namespaceEntry{Namespace: ns, Services: services})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Namespace < out[j].Namespace })
-
-	data, err := json.Marshal(map[string]any{"namespaces": out})
+	sort.Strings(namespaces)
+	data, err := json.Marshal(map[string]any{"namespaces": namespaces})
 	if err != nil {
 		return nil, err
 	}
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: string(data)}},
-		StructuredContent: map[string]any{"namespaces": out},
+		StructuredContent: map[string]any{"namespaces": namespaces},
 	}, nil
 }
