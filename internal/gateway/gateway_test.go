@@ -1,855 +1,344 @@
-package gateway
+package gateway_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/infrapi/lib/pkg/auth"
-	infraerrors "github.com/infrapi/lib/pkg/errors"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	libconfig "github.com/infrapi/lib/pkg/config"
+	"github.com/infrapi/lib/pkg/logger"
+	"github.com/infrapi/lib/pkg/mcp"
+	"github.com/infrapi/lib/pkg/server"
 
-	"github.com/infrapi/ulgen/internal/config"
+	"github.com/infrapi/ulgen/internal/gateway"
+	"github.com/infrapi/ulgen/internal/kayra"
+	"github.com/infrapi/ulgen/internal/metrics"
 )
 
-// fakeKayra: alice may read and write in acme, only read in globex; bob
-// belongs nowhere.
+const ulgenRoot = "/apis/mcp.infrapi.io/v1"
+
+// fakeKayra answers what ulgen asks: its discovery, the callers (jdoe; a
+// token for another resource), the APIs and their specs, the namespaces.
 type fakeKayra struct {
-	mu     sync.Mutex
-	checks []auth.AuthorizeRequest
+	mu   sync.Mutex
+	apis []map[string]any          // GET /apis
+	spec map[string]map[string]any // api -> its spec's paths
+	asks []string
+	url  string
+	// audience of jdoe's token
+	audience string
 }
 
-func (k *fakeKayra) Verify(_ context.Context, token string) (*auth.UserInfo, error) {
-	switch token {
-	case "alice-token", "bob-token":
-		return &auth.UserInfo{Subject: strings.TrimSuffix(token, "-token")}, nil
-	}
-	return nil, infraerrors.New(http.StatusUnauthorized, "test", "bad token")
-}
-
-func (k *fakeKayra) Authorize(_ context.Context, token string, req auth.AuthorizeRequest) (bool, string, error) {
-	k.mu.Lock()
-	k.checks = append(k.checks, req)
-	k.mu.Unlock()
-	if token != "alice-token" {
-		return false, "you are not a member of namespace " + req.Namespace, nil
-	}
-	if req.Api == "telemetry.infrapi.io" {
-		if req.Namespace != "acme" {
-			return false, "", infraerrors.New(http.StatusForbidden, "test", "namespace %q is not subscribed", req.Namespace)
+func (k *fakeKayra) start(t *testing.T) *httptest.Server {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	e := gin.New()
+	e.GET(auth.DiscoveryPath, func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"issuer": k.url, "domain": "infrapi.io",
+			"apis":      gin.H{"system": "/apis/system.infrapi.io/v1", "catalog": "/apis/catalog.infrapi.io/v1", "authorization": "/apis/authorization.infrapi.io/v1"},
+			"endpoints": gin.H{"userinfo": auth.UserinfoPath, "check": "/apis/authorization.infrapi.io/v1/check", "apis": "/apis"}})
+	})
+	e.POST(auth.UserinfoPath, func(c *gin.Context) {
+		switch c.GetHeader("Authorization") {
+		case "Bearer jdoe":
+			c.JSON(http.StatusOK, gin.H{"sub": "jdoe", "aud": []string{k.audience}})
+		case "Bearer elsewhere":
+			c.JSON(http.StatusOK, gin.H{"sub": "jdoe", "aud": []string{"https://other.example.com"}})
+		default:
+			c.JSON(http.StatusUnauthorized, gin.H{"status": 401})
 		}
-		return true, "", nil
-	}
-	switch {
-	case req.Namespace == "acme":
-		return true, "", nil
-	case req.Namespace == "globex" && req.Verb == "get":
-		return true, "", nil
-	case req.Namespace == "globex":
-		return false, "your roles grant get only", nil
-	}
-	return false, "", infraerrors.New(http.StatusNotFound, "test", "namespace %q not found", req.Namespace)
-}
-
-func (k *fakeKayra) Namespaces(_ context.Context, token string) ([]string, error) {
-	if token != "alice-token" {
-		return nil, nil
-	}
-	return []string{"acme", "globex"}, nil
-}
-
-type fakeCreds map[string]string
-
-func (f fakeCreds) Credential(_ context.Context, s config.VaultSecret, namespace string) (string, error) {
-	v, ok := f[namespace]
-	if !ok {
-		return "", errors.New("no secret")
-	}
-	return s.Key + ":" + v, nil
-}
-
-// echo answers a tool call with what the upstream received.
-func echo(name string) mcp.ToolHandler {
-	return func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		h := req.Extra.Header
-		out, err := json.Marshal(map[string]any{
-			"tool":          name,
-			"arguments":     json.RawMessage(req.Params.Arguments),
-			"authorization": h.Get("Authorization"),
-			"grafana_token": h.Get("X-Grafana-Service-Account-Token"),
-			"request_id":    h.Get("X-Request-Id"),
-		})
-		if err != nil {
-			return nil, err
+	})
+	callerOnly := func(c *gin.Context) {
+		k.mu.Lock()
+		k.asks = append(k.asks, c.Request.Method+" "+c.Request.URL.Path)
+		k.mu.Unlock()
+		if c.GetHeader("Authorization") != "Bearer jdoe" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"status": 401})
 		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(out)}}}, nil
 	}
-}
-
-func object(props ...string) map[string]any {
-	p := map[string]any{}
-	for _, name := range props {
-		p[name] = map[string]any{"type": "string"}
-	}
-	return map[string]any{"type": "object", "properties": p, "required": props}
-}
-
-func boolPtr(b bool) *bool { return &b }
-
-// grafanaUpstream mimics mcp-grafana: stateful sessions, credential per
-// request, no notion of namespace, guarded by a static bearer.
-func grafanaUpstream(t *testing.T) *httptest.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "grafana"}, nil)
-	s.AddTool(&mcp.Tool{Name: "query_prometheus", InputSchema: object("expr"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, echo("query_prometheus"))
-	s.AddTool(&mcp.Tool{Name: "delete_dashboard", InputSchema: object("uid"), Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true)}}, echo("delete_dashboard"))
-	s.AddTool(&mcp.Tool{Name: "create_folder", InputSchema: object("title"), Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(false)}}, echo("create_folder"))
-	s.AddTool(&mcp.Tool{Name: "has_namespace", InputSchema: object("namespace")}, echo("has_namespace"))
-	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer grafana-server-token" {
-			http.Error(w, "no", http.StatusUnauthorized)
+	e.GET("/apis", callerOnly, func(c *gin.Context) {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		c.JSON(http.StatusOK, k.apis)
+	})
+	e.GET("/apis/catalog.infrapi.io/v1/apiregistrations/:name/openapi.json", callerOnly, func(c *gin.Context) {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		paths, ok := k.spec[c.Param("name")]
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"status": 404})
 			return
 		}
-		h.ServeHTTP(w, r)
-	}))
+		c.JSON(http.StatusOK, gin.H{"openapi": "3.1.0", "paths": paths})
+	})
+	e.GET("/apis/system.infrapi.io/v1/namespaces", callerOnly, func(c *gin.Context) {
+		c.JSON(http.StatusOK, []gin.H{{"name": "beta"}, {"name": "acme"}})
+	})
+	srv := httptest.NewServer(e)
 	t.Cleanup(srv.Close)
+	k.url = srv.URL
 	return srv
 }
 
-// telemetryUpstream mimics an infrapi/lib MCP: stateless, "namespace" in
-// the path parameters, every request authenticated with the caller's token.
-func telemetryUpstream(t *testing.T) *httptest.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "telemetry"}, nil)
-	s.AddTool(&mcp.Tool{Name: "list_dashboards", InputSchema: object("namespace"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, echo("list_dashboards"))
-	s.AddTool(&mcp.Tool{Name: "list_apis", InputSchema: object(), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, echo("list_apis"))
-	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer alice-token") && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer bob-token") {
-			http.Error(w, "no", http.StatusUnauthorized)
+func appConfig(t *testing.T, name, url string) *libconfig.AppConfig {
+	t.Helper()
+	cfg, err := libconfig.NewConfigFromMap(map[string]string{
+		"INFRAPI_APP_NAME": name, "INFRAPI_APP_PLATFORM": "sandbox", "INFRAPI_APP_REGION": "eu-west-1",
+		"INFRAPI_APP_LOCATION": "dc1", "INFRAPI_APP_FQDN": name + ".example.com", "INFRAPI_APP_URL": url,
+	}, "test.env").GetAppConfig()
+	require.NoError(t, err)
+	return cfg
+}
+
+// computeAPI is an infrapi/lib API with its MCP endpoint: reading a VM, as
+// jdoe only, in acme only, recording the headers it was called with.
+type computeAPI struct {
+	mu      sync.Mutex
+	headers []http.Header
+}
+
+const computeContract = `{
+  "openapi": "3.0.3",
+  "info": {"title": "compute", "version": "v1"},
+  "paths": {
+    "/apis/compute.infrapi.io/v1/namespaces/{namespace}/vms/{vm}": {
+      "parameters": [
+        {"name": "namespace", "in": "path", "required": true, "schema": {"type": "string"}},
+        {"name": "vm", "in": "path", "required": true, "schema": {"type": "string"}}
+      ],
+      "get": {"operationId": "getVm", "summary": "Read a VM", "responses": {"200": {"description": "The VM"}}}
+    }
+  }
+}`
+
+func (a *computeAPI) engine(t *testing.T) http.Handler {
+	t.Helper()
+	const root = "/apis/compute.infrapi.io/v1"
+	e, err := server.NewServerGin(appConfig(t, "compute", "http://gateway.example.com"), []string{root},
+		server.WithOpenAPI(server.OpenAPISpec{Name: "compute v1", Path: "compute/v1.json", Content: []byte(computeContract)}))
+	require.NoError(t, err)
+	e.GET(root+"/namespaces/:namespace/vms/:vm", func(c *gin.Context) {
+		a.mu.Lock()
+		a.headers = append(a.headers, c.Request.Header.Clone())
+		a.mu.Unlock()
+		if c.GetHeader("Authorization") != "Bearer jdoe" || c.Param("namespace") != "acme" {
+			c.JSON(http.StatusForbidden, gin.H{"title": "Forbidden", "status": 403, "detail": "not in " + c.Param("namespace")})
 			return
 		}
-		h.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+		c.JSON(http.StatusOK, gin.H{"name": c.Param("vm"), "namespace": c.Param("namespace")})
+	})
+	h, err := mcp.New([]byte(computeContract), e, mcp.Options{Name: "compute"})
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+	e.Any(root+server.MCPPath, gin.WrapH(h))
+	return e
 }
 
-type harness struct {
-	ulgen *httptest.Server
-	kayra *fakeKayra
-	g     *Gateway
-}
-
-func newHarness(t *testing.T) *harness {
+func (a *computeAPI) last(t *testing.T) http.Header {
 	t.Helper()
-	return newHarnessWith(t, nil)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	require.NotEmpty(t, a.headers)
+	return a.headers[len(a.headers)-1]
 }
 
-// newHarnessWith is newHarness, its configuration changed by edit first.
-func newHarnessWith(t *testing.T, edit func(*config.Config)) *harness {
+type stack struct {
+	kayra   *fakeKayra
+	compute *computeAPI
+	ulgen   string
+	reg     *prometheus.Registry
+}
+
+// newStack is Kayra, a gateway with the compute API, and ulgen, as main
+// sets it up. Kayra lists compute (with its MCP), docs (without), and
+// kayra's own groups.
+func newStack(t *testing.T, ttl time.Duration) *stack {
 	t.Helper()
-	t.Setenv("GRAFANA_BEARER", "Bearer grafana-server-token")
-	cfg := &config.Config{
-		Kayra: config.KayraConfig{URL: "http://kayra.invalid"},
-		Vault: &config.VaultConfig{Address: "http://vault.invalid", RoleIDEnv: "X", SecretIDFile: "/x"},
-		Upstreams: []config.Upstream{
-			{
-				Name: "grafana", URL: grafanaUpstream(t).URL, API: "grafana.infrapi.io", Authorize: config.AuthorizeUlgen,
-				Credential:     config.Credential{Vault: &config.VaultSecret{Mount: "secret", Path: "grafana/{namespace}", Key: "token"}, Header: "X-Grafana-Service-Account-Token"},
-				Namespace:      config.Namespace{Inject: true},
-				HeadersFromEnv: map[string]string{"Authorization": "GRAFANA_BEARER"},
-			},
-			{
-				Name: "telemetry", URL: telemetryUpstream(t).URL, API: "telemetry.infrapi.io", Authorize: config.AuthorizeUpstream,
-				Credential:     config.Credential{Passthrough: true},
-				Namespace:      config.Namespace{Argument: "namespace"},
-				NamespaceCheck: &config.Check{Resource: "dashboards", Verb: "list"},
-			},
-		},
+	s := &stack{kayra: &fakeKayra{}, compute: &computeAPI{}, reg: prometheus.NewRegistry()}
+	k := s.kayra.start(t)
+	gw := httptest.NewServer(s.compute.engine(t))
+	t.Cleanup(gw.Close)
+	s.kayra.apis = []map[string]any{
+		{"api": "system.infrapi.io", "short_name": "system", "version": "v1", "builtin": true},
+		{"api": "compute.infrapi.io", "short_name": "compute", "version": "v1"},
+		{"api": "docs.infrapi.io", "short_name": "", "version": "v1"},
+		{"api": "pending.infrapi.io", "short_name": "pending", "version": "v1"},
 	}
-	if edit != nil {
-		edit(cfg)
+	s.kayra.spec = map[string]map[string]any{
+		"compute.infrapi.io": {"/apis/compute.infrapi.io/v1/-/mcp": gin.H{}, "/apis/compute.infrapi.io/v1/namespaces/{namespace}/vms/{vm}": gin.H{}},
+		"docs.infrapi.io":    {"/apis/docs.infrapi.io/v1/-/healthz": gin.H{}},
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	k := &fakeKayra{}
-	g, err := New(cfg, Options{Kayra: k, Credentials: fakeCreds{"acme": "sa-acme", "globex": "sa-globex"}})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(g.Close)
+
+	var ulgenURL string
 	mux := http.NewServeMux()
-	h := g.Handler()
-	mux.Handle("/mcp", h)
-	mux.Handle("/mcp/", h)
-	mux.Handle("/apis/", g.SpecHandler())
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return &harness{ulgen: srv, kayra: k, g: g}
+	us := httptest.NewServer(mux)
+	t.Cleanup(us.Close)
+	ulgenURL = us.URL
+	s.kayra.audience = ulgenURL
+
+	client, err := auth.NewClient(auth.ClientOptions{BaseURL: k.URL, CacheTTL: -1, PublicURL: ulgenURL})
+	require.NoError(t, err)
+	e, err := server.NewServerGin(appConfig(t, "ulgen", ulgenURL), []string{ulgenRoot}, server.WithProtectedResource(client.AuthorizationServer))
+	require.NoError(t, err)
+	log, err := logger.New(logger.Options{Level: "error", Format: "json"})
+	require.NoError(t, err)
+	g := gateway.New(gateway.Options{
+		Catalog: kayra.New(client, k.URL, 10*time.Second), GatewayURL: gw.URL, ToolsTTL: ttl, Logger: log,
+		Metrics: metrics.New(s.reg, "test"),
+	})
+	t.Cleanup(g.Close)
+	e.Any(ulgenRoot+server.MCPPath, client.Middleware(), g.Serve)
+	e.Any(ulgenRoot+server.MCPPath+"/:api", client.Middleware(), g.Serve)
+	mux.Handle("/", e)
+	s.ulgen = ulgenURL
+	return s
 }
 
+// bearer adds a token and a request id to every request.
 type bearer struct{ token string }
 
 func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
+	r.Header.Set("X-Request-Id", "req-42")
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func (h *harness) session(t *testing.T, token string) *mcp.ClientSession {
+func (s *stack) session(t *testing.T, path, token string) *sdk.ClientSession {
 	t.Helper()
-	return h.sessionAt(t, token, "/mcp")
+	session, err := sdk.NewClient(&sdk.Implementation{Name: "agent", Version: "v1"}, nil).Connect(context.Background(),
+		&sdk.StreamableClientTransport{Endpoint: s.ulgen + path, HTTPClient: &http.Client{Transport: bearer{token}}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, session.Close()) })
+	return session
 }
 
-func (h *harness) sessionAt(t *testing.T, token, path string) *mcp.ClientSession {
+func names(t *testing.T, session *sdk.ClientSession) []string {
 	t.Helper()
-	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: h.ulgen.URL + path, HTTPClient: &http.Client{Transport: bearer{token}}, MaxRetries: -1,
-	}, nil)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
+	var out []string
+	for tool, err := range session.Tools(context.Background(), nil) {
+		require.NoError(t, err)
+		out = append(out, tool.Name)
 	}
-	t.Cleanup(func() {
-		if err := s.Close(); err != nil {
-			t.Logf("close: %v", err)
-		}
-	})
-	return s
+	sort.Strings(out)
+	return out
 }
 
-func callText(t *testing.T, s *mcp.ClientSession, name string, args map[string]any) (string, bool) {
-	t.Helper()
-	res, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		t.Fatalf("CallTool %s: %v", name, err)
-	}
-	var b strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			b.WriteString(tc.Text)
-		}
-	}
-	return b.String(), res.IsError
-}
-
-func TestToolsAreAggregatedWithANamespace(t *testing.T) {
-	h := newHarness(t)
-	s := h.session(t, "alice-token")
-	res, err := s.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	byName := map[string]*mcp.Tool{}
-	for _, tl := range res.Tools {
-		byName[tl.Name] = tl
-	}
-	var names []string
-	for n := range byName {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	want := []string{"grafana_create_folder", "grafana_delete_dashboard", "grafana_query_prometheus", "list_namespaces", "telemetry_list_apis", "telemetry_list_dashboards"}
-	if !slices.Equal(names, want) {
-		t.Fatalf("tools = %v, want %v (grafana_has_namespace left out)", names, want)
-	}
-	for _, n := range []string{"grafana_query_prometheus", "telemetry_list_dashboards"} {
-		schema := byName[n].InputSchema.(map[string]any)
-		props := schema["properties"].(map[string]any)
-		if _, ok := props["namespace"]; !ok || !slices.Contains(stringList(schema["required"]), "namespace") {
-			t.Errorf("%s: no required namespace: %v", n, schema)
-		}
-	}
-	if props := byName["telemetry_list_apis"].InputSchema.(map[string]any)["properties"].(map[string]any); props["namespace"] != nil {
-		t.Errorf("telemetry_list_apis is not namespace-scoped but got a namespace")
-	}
-}
-
-func TestGrafanaCallsCheckAndUseTheNamespaceCredential(t *testing.T) {
-	h := newHarness(t)
-	s := h.session(t, "alice-token")
-	if _, err := s.ListTools(context.Background(), nil); err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-
-	out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	if isErr || !strings.Contains(out, `"grafana_token":"token:sa-acme"`) || !strings.Contains(out, `"arguments":{"expr":"up"}`) {
-		t.Errorf("acme query: %v %s", isErr, out)
-	}
-	if strings.Contains(out, "alice-token") {
-		t.Errorf("the caller's token reached a vault-credential upstream: %s", out)
-	}
-	out, isErr = callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "globex", "expr": "up"})
-	if isErr || !strings.Contains(out, "token:sa-globex") {
-		t.Errorf("globex read: %v %s", isErr, out)
-	}
-
-	// Verbs come from the annotations: globex grants get only.
-	if out, isErr := callText(t, s, "grafana_delete_dashboard", map[string]any{"namespace": "globex", "uid": "x"}); !isErr || !strings.Contains(out, "get only") {
-		t.Errorf("globex delete: %v %s", isErr, out)
-	}
-	if _, isErr := callText(t, s, "grafana_create_folder", map[string]any{"namespace": "acme", "title": "x"}); isErr {
-		t.Errorf("acme create refused")
-	}
-	h.kayra.mu.Lock()
-	var verbs []string
-	for _, c := range h.kayra.checks {
-		if c.Api != "grafana.infrapi.io" || c.Resource != "tools" {
-			t.Errorf("check = %+v", c)
-		}
-		verbs = append(verbs, c.Verb)
-	}
-	h.kayra.mu.Unlock()
-	if !slices.Equal(verbs, []string{"get", "get", "delete", "create"}) {
-		t.Errorf("verbs checked = %v", verbs)
-	}
-
-	for desc, args := range map[string]map[string]any{
-		"unknown namespace": {"namespace": "initech", "expr": "up"},
-		"no namespace":      {"expr": "up"},
-		"path traversal":    {"namespace": "../acme", "expr": "up"},
-	} {
-		if out, isErr := callText(t, s, "grafana_query_prometheus", args); !isErr || strings.Contains(out, "sa-") {
-			t.Errorf("%s: %v %s", desc, isErr, out)
-		}
-	}
-}
-
-func TestTelemetryCallsPassTheCallerThrough(t *testing.T) {
-	h := newHarness(t)
-	s := h.session(t, "alice-token")
-	if _, err := s.ListTools(context.Background(), nil); err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	out, isErr := callText(t, s, "telemetry_list_dashboards", map[string]any{"namespace": "acme"})
-	if isErr || !strings.Contains(out, `"authorization":"Bearer alice-token"`) || !strings.Contains(out, `"arguments":{"namespace":"acme"}`) {
-		t.Errorf("telemetry call: %v %s", isErr, out)
-	}
-	h.kayra.mu.Lock()
-	n := len(h.kayra.checks)
-	h.kayra.mu.Unlock()
-	if n != 0 {
-		t.Errorf("ulgen checked an upstream that authorizes itself")
-	}
-
-	// Another caller, same shared upstream session: their own token.
-	s2 := h.session(t, "bob-token")
-	if out, _ := callText(t, s2, "telemetry_list_apis", nil); !strings.Contains(out, "Bearer bob-token") {
-		t.Errorf("bob's call carried %s", out)
-	}
-}
-
-func TestListNamespaces(t *testing.T) {
-	h := newHarness(t)
-	out, isErr := callText(t, h.session(t, "alice-token"), "list_namespaces", nil)
-	want := `{"namespaces":[{"namespace":"acme","services":["grafana","telemetry"]},{"namespace":"globex","services":["grafana"]}]}`
-	if isErr || out != want {
-		t.Errorf("list_namespaces = %s, want %s", out, want)
-	}
-	if out, _ := callText(t, h.session(t, "bob-token"), "list_namespaces", nil); out != `{"namespaces":[]}` {
-		t.Errorf("bob list_namespaces = %s", out)
-	}
-}
-
-func anonymous(t *testing.T, h *harness, path string) *mcp.ClientSession {
-	t.Helper()
-	c := mcp.NewClient(&mcp.Implementation{Name: "health"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: h.ulgen.URL + path, MaxRetries: -1},
-		&mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
-	if err != nil {
-		t.Fatalf("handshake without a token: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := s.Close(); err != nil {
-			t.Logf("close: %v", err)
-		}
-	})
-	return s
-}
-
-func toolNames(t *testing.T, s *mcp.ClientSession) []string {
-	t.Helper()
-	res, err := s.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	var names []string
-	for _, tl := range res.Tools {
-		names = append(names, tl.Name)
-	}
-	slices.Sort(names)
-	return names
-}
-
-// TestWithoutToken: a gateway's health check and UI (no user) open a
-// session and list the tools; calling one takes a caller's token.
-func TestWithoutToken(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
-	s := anonymous(t, h, "/mcp")
-	if err := s.Ping(context.Background(), nil); err != nil {
-		t.Errorf("ping without a token: %v", err)
-	}
-	// telemetry wants a token even to list: without list_token_file, not listed yet
-	names := toolNames(t, s)
-	if !slices.Contains(names, "grafana_query_prometheus") || slices.Contains(names, "telemetry_list_dashboards") {
-		t.Errorf("anonymous tools/list = %v", names)
-	}
-	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "grafana_query_prometheus", Arguments: map[string]any{"namespace": "acme", "expr": "up"}}); err == nil {
-		t.Errorf("tools/call without a token answered")
-	}
-
-	// a caller's listing completes the catalogue at once (the anonymous one did not start the TTL)...
-	if names := toolNames(t, h.session(t, "alice-token")); !slices.Contains(names, "telemetry_list_dashboards") {
-		t.Errorf("caller's tools/list = %v", names)
-	}
-	// ...which anonymous listings then show
-	if names := toolNames(t, anonymous(t, h, "/mcp/telemetry")); !slices.Contains(names, "list_dashboards") {
-		t.Errorf("anonymous /mcp/telemetry after a caller = %v", names)
-	}
-}
-
-func TestListTokenFile(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
-	path := filepath.Join(t.TempDir(), "list-token")
-	if err := os.WriteFile(path, []byte("bob-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h.g.cfg.ListTokenFile = path
-	if names := toolNames(t, anonymous(t, h, "/mcp/telemetry")); !slices.Contains(names, "list_dashboards") {
-		t.Errorf("anonymous /mcp/telemetry with list_token_file = %v", names)
-	}
-}
-
-func TestCallersMustAuthenticate(t *testing.T) {
-	h := newHarness(t)
-	for _, tok := range []string{"", "forged"} {
-		req, err := http.NewRequest(http.MethodPost, h.ulgen.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_namespaces"}}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
+// Without a token, or with one for another resource: 401, naming the
+// protected resource metadata an MCP client logs in from.
+func TestUnauthenticated(t *testing.T) {
+	s := newStack(t, time.Minute)
+	for _, token := range []string{"", "elsewhere", "nope"} {
+		req, err := http.NewRequest(http.MethodPost, s.ulgen+ulgenRoot+"/-/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		require.NoError(t, err)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := resp.Body.Close(); err != nil {
-			t.Errorf("close: %v", err)
-		}
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("token %q: %d", tok, resp.StatusCode)
-		}
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, token)
+		assert.Contains(t, resp.Header.Get("WWW-Authenticate"), `resource_metadata="`+s.ulgen+ulgenRoot+"/-/oauth-protected-resource", token)
 	}
+
+	resp, err := http.Get(s.ulgen + ulgenRoot + "/-/oauth-protected-resource")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	var prm map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&prm))
+	assert.Equal(t, s.ulgen+ulgenRoot, prm["resource"])
+	assert.Equal(t, []any{s.kayra.url}, prm["authorization_servers"])
 }
 
-func TestSpec(t *testing.T) {
-	h := newHarness(t)
-	resp, err := http.Get(h.ulgen.URL + "/apis/grafana.infrapi.io/v1/-/openapi.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"/apis/grafana.infrapi.io/v1/namespaces/{namespace}/tools/{tool}"`) {
-		t.Errorf("spec: %d %s", resp.StatusCode, body)
-	}
-	if resp, err := http.Get(h.ulgen.URL + "/apis/telemetry.infrapi.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("telemetry authorizes itself, ulgen must not serve its spec")
-	} else if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
+// The APIs Kayra knows that serve MCP: their tools prefixed by their short
+// name on the aggregate, under their own names on their endpoint.
+func TestTools(t *testing.T) {
+	s := newStack(t, time.Minute)
+	assert.Equal(t, []string{"compute_get_vm", "list_namespaces"}, names(t, s.session(t, ulgenRoot+"/-/mcp", "jdoe")))
+	assert.Equal(t, []string{"get_vm", "list_namespaces"}, names(t, s.session(t, ulgenRoot+"/-/mcp/compute", "jdoe")))
+
+	resp, err := http.Post(s.ulgen+ulgenRoot+"/-/mcp/nope", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "a token first")
 }
 
-// With check, grafana borrows telemetry's rights: one right for every call,
-// read-only tools only, no OpenAPI document of its own.
-func TestFixedCheck(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) {
-		c.Upstreams[0].API = "telemetry.infrapi.io"
-		c.Upstreams[0].Check = &config.Check{Resource: "dashboards", Verb: "get"}
-	})
-	s := h.session(t, "alice-token")
-	names := toolNames(t, s)
-	if !slices.Contains(names, "grafana_query_prometheus") {
-		t.Errorf("the read-only tool must be exposed: %v", names)
-	}
-	for _, n := range []string{"grafana_delete_dashboard", "grafana_create_folder", "grafana_has_namespace"} {
-		if slices.Contains(names, n) {
-			t.Errorf("%s is not read-only: one right can't allow it: %v", n, names)
-		}
-	}
+// A call goes to its API with the caller's token and request id; the
+// API's refusal is the agent's tool error.
+func TestCall(t *testing.T) {
+	s := newStack(t, time.Minute)
+	session := s.session(t, ulgenRoot+"/-/mcp", "jdoe")
+	res, err := session.CallTool(context.Background(), &sdk.CallToolParams{Name: "compute_get_vm",
+		Arguments: map[string]any{"namespace": "acme", "vm": "web-1"}})
+	require.NoError(t, err)
+	require.False(t, res.IsError, res.Content)
+	assert.Equal(t, map[string]any{"name": "web-1", "namespace": "acme"}, res.StructuredContent)
+	h := s.compute.last(t)
+	assert.Equal(t, "Bearer jdoe", h.Get("Authorization"))
+	assert.Equal(t, "req-42", h.Get("X-Request-Id"))
 
-	if out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"}); isErr || !strings.Contains(out, "token:sa-acme") {
-		t.Errorf("acme query: %v %s", isErr, out)
-	}
-	// globex is not subscribed to telemetry: refused, though grafana's own rights would allow get
-	if out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "globex", "expr": "up"}); !isErr || strings.Contains(out, "sa-globex") {
-		t.Errorf("globex query: %v %s", isErr, out)
-	}
-	h.kayra.mu.Lock()
-	for _, c := range h.kayra.checks {
-		if c.Api != "telemetry.infrapi.io" || c.Resource != "dashboards" || c.Verb != "get" {
-			t.Errorf("check = %+v, want telemetry.infrapi.io dashboards get", c)
-		}
-	}
-	h.kayra.mu.Unlock()
+	res, err = session.CallTool(context.Background(), &sdk.CallToolParams{Name: "compute_get_vm",
+		Arguments: map[string]any{"namespace": "beta", "vm": "web-1"}})
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, res.Content[0].(*sdk.TextContent).Text, "not in beta")
 
-	if resp, err := http.Get(h.ulgen.URL + "/apis/telemetry.infrapi.io/v1/-/openapi.json"); err != nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("the borrowed api serves its own document, not ulgen")
-	} else if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-}
+	own := s.session(t, ulgenRoot+"/-/mcp/compute", "jdoe")
+	res, err = own.CallTool(context.Background(), &sdk.CallToolParams{Name: "get_vm", Arguments: map[string]any{"namespace": "acme", "vm": "db"}})
+	require.NoError(t, err)
+	require.False(t, res.IsError, res.Content)
 
-// Without anonymous_listing, every request needs a token: a client without
-// one gets the 401 naming the resource metadata, which starts its login.
-func TestTokenRequired(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) {
-		c.ResourceMetadata = "https://gateway.example/.well-known/oauth-protected-resource/mcp"
-	})
-	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`
-	resp, err := http.Post(h.ulgen.URL+"/mcp", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-	want := `Bearer resource_metadata="https://gateway.example/.well-known/oauth-protected-resource/mcp"`
-	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") != want {
-		t.Errorf("initialize without a token: %d %q, want 401 %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"), want)
-	}
-	// with a token, as before
-	if names := toolNames(t, h.session(t, "alice-token")); !slices.Contains(names, "grafana_query_prometheus") {
-		t.Errorf("tools with a token = %v", names)
-	}
-}
-
-// allowed_tools: only the upstream's tools a regular expression matches
-// whole are listed, and the others can't be called.
-func TestAllowedTools(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) {
-		c.Upstreams[0].AllowedTools = []config.ToolRule{{Match: "query_.*"}, {Match: "create_fold"}}
-	})
-	s := h.session(t, "alice-token")
-	names := toolNames(t, s)
-	if !slices.Contains(names, "grafana_query_prometheus") {
-		t.Errorf("query_prometheus must be listed: %v", names)
-	}
-	for _, n := range []string{"grafana_delete_dashboard", "grafana_has_namespace", "grafana_create_folder"} {
-		if slices.Contains(names, n) {
-			t.Errorf("%s must not be listed (a whole-name match only): %v", n, names)
+	n, err := s.reg.Gather()
+	require.NoError(t, err)
+	found := map[string]float64{}
+	for _, mf := range n {
+		if mf.GetName() != "ulgen_tool_calls_total" {
+			continue
 		}
-	}
-	if !slices.Contains(names, "telemetry_list_dashboards") {
-		t.Errorf("an upstream without allowed_tools keeps every tool: %v", names)
-	}
-	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "grafana_delete_dashboard", Arguments: map[string]any{"namespace": "acme", "uid": "x"}}); err == nil {
-		t.Errorf("a tool left out by allowed_tools was called")
-	}
-}
-
-// allowed_tools rules with a resource: each call is checked on its rule's
-// resource of the upstream's api, verb from the annotations unless set, and
-// the api's OpenAPI document declares those resources (Kayra validates roles
-// against it).
-func TestToolResources(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) {
-		c.Upstreams[0].API = "mcp.infrapi.io"
-		c.Upstreams[0].AllowedTools = []config.ToolRule{
-			{Match: "query_.*", Resource: "prometheus"},
-			{Match: "delete_dashboard", Resource: "dashboards"},
-			{Match: "create_folder", Resource: "dashboards", Verb: "get"},
-		}
-	})
-	s := h.session(t, "alice-token")
-	callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	callText(t, s, "grafana_delete_dashboard", map[string]any{"namespace": "acme", "uid": "x"})
-	callText(t, s, "grafana_create_folder", map[string]any{"namespace": "acme", "title": "x"})
-	h.kayra.mu.Lock()
-	var got []string
-	for _, c := range h.kayra.checks {
-		if c.Api == "mcp.infrapi.io" && c.Namespace == "acme" {
-			got = append(got, c.Resource+":"+c.Verb)
-		}
-	}
-	h.kayra.mu.Unlock()
-	want := []string{"prometheus:get", "dashboards:delete", "dashboards:get"}
-	if !slices.Equal(got, want) {
-		t.Errorf("checks = %v, want %v (a delete tool needs delete, a verb set overrides)", got, want)
-	}
-
-	resp, err := http.Get(h.ulgen.URL + "/apis/mcp.infrapi.io/v1/-/openapi.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-	for _, p := range []string{"/namespaces/{namespace}/prometheus/{tool}", "/namespaces/{namespace}/dashboards/{tool}"} {
-		if !strings.Contains(string(body), `"/apis/mcp.infrapi.io/v1`+p+`"`) {
-			t.Errorf("spec lacks %s: %s", p, body)
-		}
-	}
-	if strings.Contains(string(body), "/tools/{tool}") {
-		t.Errorf("every rule names a resource: no tools resource expected: %s", body)
-	}
-}
-
-// The audit log: one line per call, the caller, the namespace, the tool and
-// how it ended.
-func TestAuditLog(t *testing.T) {
-	var buf syncBuffer
-	h := newHarnessWith(t, nil)
-	h.g.log = slog.New(slog.NewJSONHandler(&buf, nil))
-	s := h.session(t, "alice-token")
-	callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	callText(t, s, "grafana_delete_dashboard", map[string]any{"namespace": "globex", "uid": "x"})
-
-	var calls []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var e map[string]any
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("log line %q: %v", line, err)
-		}
-		if e["msg"] == "tool call" {
-			calls = append(calls, e)
-		}
-	}
-	if len(calls) != 2 {
-		t.Fatalf("tool call lines = %v", calls)
-	}
-	for i, want := range []map[string]string{
-		{"user": "alice", "upstream": "grafana", "tool": "query_prometheus", "namespace": "acme", "outcome": "ok"},
-		{"user": "alice", "upstream": "grafana", "tool": "delete_dashboard", "namespace": "globex", "outcome": "refused"},
-	} {
-		for k, v := range want {
-			if calls[i][k] != v {
-				t.Errorf("call %d: %s = %v, want %q", i, k, calls[i][k], v)
+		for _, m := range mf.GetMetric() {
+			var outcome string
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "outcome" {
+					outcome = l.GetValue()
+				}
 			}
+			found[outcome] += m.GetCounter().GetValue()
 		}
 	}
+	assert.Equal(t, map[string]float64{"ok": 2, "tool_error": 1}, found)
 }
 
-// syncBuffer is a bytes.Buffer safe for the log's concurrent writes.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+// list_namespaces: the caller's namespaces, as Kayra lists them.
+func TestListNamespaces(t *testing.T) {
+	s := newStack(t, time.Minute)
+	res, err := s.session(t, ulgenRoot+"/-/mcp", "jdoe").CallTool(context.Background(), &sdk.CallToolParams{Name: "list_namespaces"})
+	require.NoError(t, err)
+	require.False(t, res.IsError, res.Content)
+	assert.Equal(t, map[string]any{"namespaces": []any{"acme", "beta"}}, res.StructuredContent)
 }
 
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
+// The APIs are listed again after ToolsTTL: one gone takes its tools and
+// its endpoint with it.
+func TestRefresh(t *testing.T) {
+	s := newStack(t, 0)
+	session := s.session(t, ulgenRoot+"/-/mcp", "jdoe")
+	assert.Contains(t, names(t, session), "compute_get_vm")
 
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-// headers sets several headers on every request.
-type headers map[string]string
-
-func (hs headers) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	for k, v := range hs {
-		r.Header.Set(k, v)
-	}
-	return http.DefaultTransport.RoundTrip(r)
-}
-
-// /metrics counts what callers do, and a request's X-Request-Id reaches the
-// upstream and the audit log.
-func TestMetricsAndRequestID(t *testing.T) {
-	var buf syncBuffer
-	h := newHarnessWith(t, nil)
-	h.g.log = slog.New(slog.NewJSONHandler(&buf, nil))
-	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint:   h.ulgen.URL + "/mcp",
-		HTTPClient: &http.Client{Transport: headers{"Authorization": "Bearer alice-token", "X-Request-Id": "req-42"}},
-		MaxRetries: -1,
-	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := s.Close(); err != nil {
-			t.Logf("close: %v", err)
-		}
-	})
-	out, isErr := callText(t, s, "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	if isErr || !strings.Contains(out, `"request_id":"req-42"`) {
-		t.Errorf("the upstream must get X-Request-Id: %v %s", isErr, out)
-	}
-	callText(t, s, "grafana_delete_dashboard", map[string]any{"namespace": "globex", "uid": "x"})
-	if !strings.Contains(buf.String(), `"request_id":"req-42"`) {
-		t.Errorf("the audit log must carry the request id: %s", buf.String())
-	}
-	// a request without a token
-	resp, err := http.Post(h.ulgen.URL+"/mcp", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	h.g.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := rec.Body.String()
-	for _, want := range []string{
-		`ulgen_tool_calls_total{outcome="ok",tool="query_prometheus",upstream="grafana"} 1`,
-		`ulgen_tool_calls_total{outcome="refused",tool="delete_dashboard",upstream="grafana"} 1`,
-		`ulgen_tool_call_duration_seconds_count{outcome="ok",upstream="grafana"} 1`,
-		`ulgen_kayra_request_duration_seconds_count{op="check",result="ok"}`,
-		`ulgen_kayra_request_duration_seconds_count{op="check",result="denied"} 1`,
-		`ulgen_kayra_request_duration_seconds_count{op="verify",result="ok"}`,
-		`ulgen_credential_reads_total{result="ok",upstream="grafana"} 1`,
-		`ulgen_unauthenticated_requests_total{reason="no_token"} 1`,
-		`ulgen_tools_exposed{upstream="grafana"}`,
-		`ulgen_build_info{version=""} 1`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("/metrics lacks %s", want)
-		}
-	}
-}
-
-func TestVerbOf(t *testing.T) {
-	for want, a := range map[string]*mcp.ToolAnnotations{
-		"get":    {ReadOnlyHint: true},
-		"create": {DestructiveHint: boolPtr(false)},
-	} {
-		if got := verbOf(&mcp.Tool{Annotations: a}); got != want {
-			t.Errorf("verbOf(%+v) = %s, want %s", a, got, want)
-		}
-	}
-	for _, a := range []*mcp.ToolAnnotations{nil, {}, {DestructiveHint: boolPtr(true)}} {
-		if got := verbOf(&mcp.Tool{Annotations: a}); got != "delete" {
-			t.Errorf("verbOf(%+v) = %s, want delete", a, got)
-		}
-	}
-}
-
-func TestOneServerPerUpstream(t *testing.T) {
-	h := newHarness(t)
-	g := h.sessionAt(t, "alice-token", "/mcp/grafana")
-	res, err := g.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	var names []string
-	for _, tl := range res.Tools {
-		names = append(names, tl.Name)
-	}
-	slices.Sort(names)
-	if want := []string{"create_folder", "delete_dashboard", "list_namespaces", "query_prometheus"}; !slices.Equal(names, want) {
-		t.Fatalf("/mcp/grafana tools = %v, want %v", names, want)
-	}
-	out, isErr := callText(t, g, "query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	if isErr || !strings.Contains(out, "token:sa-acme") {
-		t.Errorf("/mcp/grafana query: %v %s", isErr, out)
-	}
-	if out, isErr := callText(t, g, "delete_dashboard", map[string]any{"namespace": "globex", "uid": "x"}); !isErr || !strings.Contains(out, "get only") {
-		t.Errorf("/mcp/grafana delete on globex: %v %s", isErr, out)
-	}
-
-	tel := h.sessionAt(t, "alice-token", "/mcp/telemetry")
-	if out, _ := callText(t, tel, "list_namespaces", nil); out != `{"namespaces":[{"namespace":"acme","services":["telemetry"]}]}` {
-		t.Errorf("/mcp/telemetry list_namespaces = %s", out)
-	}
-	if out, isErr := callText(t, tel, "list_dashboards", map[string]any{"namespace": "acme"}); isErr || !strings.Contains(out, "Bearer alice-token") {
-		t.Errorf("/mcp/telemetry call: %v %s", isErr, out)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, h.ulgen.URL+"/mcp/nope", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer alice-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("close: %v", err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("/mcp/nope: %d", resp.StatusCode)
-	}
-}
-
-func TestCallBeforeAnyList(t *testing.T) {
-	h := newHarness(t)
-	out, isErr := callText(t, h.session(t, "alice-token"), "grafana_query_prometheus", map[string]any{"namespace": "acme", "expr": "up"})
-	if isErr || !strings.Contains(out, "token:sa-acme") {
-		t.Errorf("first call without tools/list: %v %s", isErr, out)
-	}
-}
-
-type header struct{ name, value string }
-
-func (h header) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set(h.name, h.value)
-	return http.DefaultTransport.RoundTrip(r)
-}
-
-func TestTokenHeader(t *testing.T) {
-	h := newHarnessWith(t, func(c *config.Config) { c.AnonymousListing = true })
-	h.g.cfg.TokenHeader = "X-Kayra-Token"
-	for _, v := range []string{"Bearer alice-token", "alice-token"} {
-		c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-		s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-			Endpoint: h.ulgen.URL + "/mcp/telemetry", HTTPClient: &http.Client{Transport: header{"X-Kayra-Token", v}}, MaxRetries: -1,
-		}, nil)
-		if err != nil {
-			t.Fatalf("Connect with X-Kayra-Token %q: %v", v, err)
-		}
-		// passed on to the upstream as Authorization
-		if out, isErr := callText(t, s, "list_dashboards", map[string]any{"namespace": "acme"}); isErr || !strings.Contains(out, "Bearer alice-token") {
-			t.Errorf("%q: %v %s", v, isErr, out)
-		}
-		if err := s.Close(); err != nil {
-			t.Logf("close: %v", err)
-		}
-	}
-	// Authorization is no longer read: the handshake opens (no token needed), the rest is refused
-	c := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
-	s, err := c.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint: h.ulgen.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer{"alice-token"}}, MaxRetries: -1,
-	}, &mcp.ClientSessionOptions{ProtocolVersion: "2025-06-18"})
-	if err != nil {
-		t.Fatalf("handshake: %v", err)
-	}
-	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "telemetry_list_dashboards", Arguments: map[string]any{"namespace": "acme"}}); err == nil {
-		t.Errorf("Authorization accepted while token_header is X-Kayra-Token")
-	}
-	if err := s.Close(); err != nil {
-		t.Logf("close: %v", err)
-	}
+	s.kayra.mu.Lock()
+	s.kayra.apis = s.kayra.apis[:1]
+	s.kayra.mu.Unlock()
+	assert.Equal(t, []string{"list_namespaces"}, names(t, session))
 }

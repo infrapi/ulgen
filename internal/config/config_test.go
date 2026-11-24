@@ -1,120 +1,79 @@
-package config
+package config_test
 
 import (
-	"os"
-	"path/filepath"
-	"slices"
-	"strings"
+	"maps"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	libconfig "github.com/infrapi/lib/pkg/config"
+
+	"github.com/infrapi/ulgen/internal/config"
 )
 
-const base = `
-kayra: {url: https://kayra.example.com}
-vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}
-upstreams:
-  - name: grafana
-    url: http://mcp-grafana:8000/mcp
-    api: grafana.infrapi.io
-    authorize: ulgen
-    credential: {vault: {mount: secret, path: "grafana/{namespace}", key: token}, header: X-Grafana-Service-Account-Token}
-    namespace: {inject: true}
-  - name: telemetry
-    url: https://api.example.com/apis/telemetry.infrapi.io/v1/-/mcp
-    api: telemetry.infrapi.io
-    authorize: upstream
-    credential: {passthrough: true}
-    namespace: {argument: namespace}
-`
+var base = map[string]string{
+	"INFRAPI_APP_NAME": "ulgen", "INFRAPI_APP_PLATFORM": "sandbox", "INFRAPI_APP_REGION": "eu-west-1",
+	"INFRAPI_APP_LOCATION": "dc1", "INFRAPI_APP_FQDN": "ulgen.example.com", "INFRAPI_APP_URL": "https://api.example.com",
+	"INFRAPI_ULGEN_API": "mcp.infrapi.io", "INFRAPI_ULGEN_AUTH_URL": "https://kayra.example.com",
+}
 
-func load(t *testing.T, content string) (*Config, error) {
+func load(t *testing.T, extra map[string]string) (*config.Config, error) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "ulgen.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return Load(path)
-}
-
-func TestLoad(t *testing.T) {
-	cfg, err := load(t, base)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c := cfg.Upstreams[0].NamespaceCheck; c == nil || c.Resource != "tools" || c.Verb != "get" || cfg.Upstreams[1].NamespaceCheck != nil {
-		t.Errorf("namespace_check defaults: %+v %+v", cfg.Upstreams[0].NamespaceCheck, cfg.Upstreams[1].NamespaceCheck)
-	}
-	if cfg.Listen != ":8080" || cfg.Path != "/mcp" || cfg.Upstreams[0].Version != "v1" || cfg.Upstreams[0].ProtocolVersion != "2025-06-18" {
-		t.Errorf("defaults not applied: %+v", cfg)
-	}
-
-	withRules, err := load(t, strings.Replace(base, "namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [\"search_.*\", {match: \"query_.*\", resource: prometheus}, {match: \"get_.*\", resource: dashboards, verb: get}]", 1))
-	if err != nil {
-		t.Fatalf("Load with rules: %v", err)
-	}
-	g := withRules.Upstreams[0]
-	if r, ok := g.ToolRule("query_prometheus"); !ok || r.Resource != "prometheus" {
-		t.Errorf("query_prometheus rule = %+v %v", r, ok)
-	}
-	if r, ok := g.ToolRule("search_dashboards"); !ok || r.Resource != "" {
-		t.Errorf("search_dashboards rule = %+v %v", r, ok)
-	}
-	if _, ok := g.ToolRule("delete_dashboard"); ok {
-		t.Errorf("delete_dashboard matches no rule: not exposed")
-	}
-	if c := g.NamespaceCheck; c == nil || c.Resource != "prometheus" || c.Verb != "get" {
-		t.Errorf("namespace_check must default to the first rule's resource: %+v", c)
-	}
-	if res := g.Resources(); !slices.Equal(res, []string{"prometheus", "dashboards", "tools"}) {
-		t.Errorf("resources = %v", res)
-	}
-
-	withCheck, err := load(t, strings.Replace(base, "namespace: {inject: true}", "namespace: {inject: true}\n    check: {resource: dashboards, verb: get}", 1))
-	if err != nil {
-		t.Fatalf("Load with check: %v", err)
-	}
-	if c := withCheck.Upstreams[0].NamespaceCheck; c == nil || c.Resource != "dashboards" || c.Verb != "get" {
-		t.Errorf("namespace_check must default to check: %+v", c)
-	}
-
-	cases := map[string]struct{ from, to, want string }{
-		"unknown field":                {"namespace: {inject: true}", "namespace: {inject: true}\n    typo: 1", "typo"},
-		"bad name":                     {"name: grafana", "name: Grafana", "lowercase"},
-		"duplicate":                    {"name: telemetry", "name: grafana", "duplicated"},
-		"ulgen without api":            {"api: grafana.infrapi.io", "api: \"\"", "needs api"},
-		"upstream needs caller":        {"credential: {passthrough: true}", "credential: {vault: {mount: s, path: p, key: k}, header: H}", "passthrough"},
-		"both credentials":             {"credential: {passthrough: true}", "credential: {passthrough: true, vault: {mount: s, path: p, key: k}}", "exclusive"},
-		"bad authorize":                {"authorize: upstream", "authorize: nobody", "authorize"},
-		"no vault":                     {"vault: {address: https://vault.example.com, role_id_env: ROLE, secret_id_file: /run/secret-id}", "", "vault:"},
-		"namespace_check without verb": {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    namespace_check: {resource: dashboards}", "namespace_check"},
-		"missing env header":           {"namespace: {inject: true}", "namespace: {inject: true}\n    headers_from_env: {Authorization: ULGEN_TEST_UNSET}", "ULGEN_TEST_UNSET"},
-		"tls without key":              {"kayra: {url: https://kayra.example.com}", "kayra: {url: https://kayra.example.com}\ntls: {cert_file: /etc/ulgen/cert.pem}", "tls: cert_file and key_file"},
-		"allowed_tools typo":           {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, resouce: y}]", "resouce"},
-		"verb without resource":        {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, verb: get}]", "verb without resource"},
-		"resource on upstream":         {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    allowed_tools: [{match: x, resource: y}]", "only with authorize: ulgen"},
-		"bad resource name":            {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [{match: x, resource: Prom}]", "lowercase"},
-		"bad allowed_tools":            {"namespace: {inject: true}", "namespace: {inject: true}\n    allowed_tools: [\"query_(\"]", "allowed_tools"},
-		"check without verb":           {"namespace: {inject: true}", "namespace: {inject: true}\n    check: {resource: dashboards}", "check: needs"},
-		"check on upstream":            {"namespace: {argument: namespace}", "namespace: {argument: namespace}\n    check: {resource: dashboards, verb: get}", "only with authorize: ulgen"},
-	}
-	for desc, tc := range cases {
-		content := strings.Replace(base, tc.from, tc.to, 1)
-		if content == base {
-			t.Fatalf("%s: replacement did not apply", desc)
-		}
-		if _, err := load(t, content); err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: err = %v, want it to mention %q", desc, err, tc.want)
+	v := maps.Clone(base)
+	maps.Copy(v, extra)
+	for k, val := range v {
+		if val == "-" {
+			delete(v, k)
 		}
 	}
+	return config.FromVariables(libconfig.NewConfigFromMap(v, "ulgen.env"))
 }
 
-// The example in the repository is a valid configuration.
-func TestExample(t *testing.T) {
-	t.Setenv("MCP_GRAFANA_CALLER_AUTH", "Bearer example")
-	cfg, err := Load(filepath.Join("..", "..", "ulgen.example.yaml"))
-	if err != nil {
-		t.Fatalf("ulgen.example.yaml: %v", err)
-	}
-	if len(cfg.Upstreams) == 0 {
-		t.Error("ulgen.example.yaml: no upstream")
+// The defaults: Kayra is the gateway, every API, 1m and 5m.
+func TestDefaults(t *testing.T) {
+	c, err := load(t, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "/apis/mcp.infrapi.io/v1", c.Root())
+	assert.Equal(t, "https://kayra.example.com", c.GatewayURL)
+	assert.Equal(t, time.Minute, c.AuthCacheTTL)
+	assert.Equal(t, 5*time.Minute, c.ToolsTTL)
+	assert.True(t, c.Serves("compute.infrapi.io"))
+	assert.False(t, c.Serves("mcp.infrapi.io"), "not its own")
+}
+
+// INFRAPI_ULGEN_APIS_INCLUDE and _EXCLUDE: whole names.
+func TestServes(t *testing.T) {
+	c, err := load(t, map[string]string{
+		"INFRAPI_ULGEN_APIS_INCLUDE": `.*\.infrapi\.io`, "INFRAPI_ULGEN_APIS_EXCLUDE": "secret.infrapi.io",
+		"INFRAPI_ULGEN_GATEWAY_URL": "https://api.example.com", "INFRAPI_ULGEN_TOOLS_TTL": "30s",
+	})
+	require.NoError(t, err)
+	assert.True(t, c.Serves("compute.infrapi.io"))
+	assert.False(t, c.Serves("secret.infrapi.io"))
+	assert.False(t, c.Serves("compute.infrapi.io.evil"), "anchored")
+	assert.False(t, c.Serves("other.example.com"))
+	assert.Equal(t, "https://api.example.com", c.GatewayURL)
+	assert.Equal(t, 30*time.Second, c.ToolsTTL)
+}
+
+func TestRefused(t *testing.T) {
+	for name, extra := range map[string]map[string]string{
+		"no api":          {"INFRAPI_ULGEN_API": "-"},
+		"api not a name":  {"INFRAPI_ULGEN_API": "not a name"},
+		"no kayra":        {"INFRAPI_ULGEN_AUTH_URL": "-"},
+		"kayra not a url": {"INFRAPI_ULGEN_AUTH_URL": "kayra"},
+		"bad gateway":     {"INFRAPI_ULGEN_GATEWAY_URL": "nope"},
+		"bad ttl":         {"INFRAPI_ULGEN_TOOLS_TTL": "soon"},
+		"bad cache ttl":   {"INFRAPI_ULGEN_AUTH_CACHE_TTL": "soon"},
+		"bad include":     {"INFRAPI_ULGEN_APIS_INCLUDE": "("},
+		"bad exclude":     {"INFRAPI_ULGEN_APIS_EXCLUDE": "("},
+		"no app":          {"INFRAPI_APP_NAME": "-"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := load(t, extra)
+			require.Error(t, err)
+		})
 	}
 }

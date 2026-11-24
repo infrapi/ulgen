@@ -3,12 +3,13 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/infrapi/lib/pkg/logger"
 )
 
 // callTimeout bounds one upstream HTTP request.
@@ -59,20 +60,20 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.next.RoundTrip(req)
 }
 
-// upstreamClient keeps one MCP session to an upstream, reconnecting when
-// it breaks.
+// upstreamClient keeps one MCP session to an API's MCP endpoint,
+// reconnecting when it breaks.
 type upstreamClient struct {
 	url      string
 	protocol string
 	client   *mcp.Client
 	http     *http.Client
-	log      *slog.Logger
+	log      *logger.Logger
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
 }
 
-func newUpstreamClient(url, protocol string, static http.Header, base http.RoundTripper, log *slog.Logger) *upstreamClient {
+func newUpstreamClient(url, protocol string, static http.Header, base http.RoundTripper, log *logger.Logger) *upstreamClient {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -120,7 +121,7 @@ func (u *upstreamClient) drop(s *mcp.ClientSession) {
 	u.session = nil
 	u.mu.Unlock()
 	if err := s.Close(); err != nil {
-		u.log.Debug("closing a broken upstream session", "upstream", u.url, "error", err)
+		u.log.Debug("closing a broken upstream session", logger.String("upstream", u.url), logger.Err(err))
 	}
 }
 
@@ -182,7 +183,7 @@ func (u *upstreamClient) close() {
 	u.mu.Unlock()
 	if s != nil {
 		if err := s.Close(); err != nil {
-			u.log.Debug("closing upstream session", "upstream", u.url, "error", err)
+			u.log.Debug("closing upstream session", logger.String("upstream", u.url), logger.Err(err))
 		}
 	}
 }

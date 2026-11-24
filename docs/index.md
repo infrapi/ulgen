@@ -1,50 +1,58 @@
 ---
 title: ulgen
-description: One MCP endpoint in front of several MCP servers, every tool scoped to a namespace and every call authorized by Kayra.
+description: One MCP endpoint in front of the platform's APIs, found in Kayra's catalog, every call made as the caller.
 weight: 10
 ---
 
 # ulgen
 
-ulgen is one MCP server in front of several, for multi-tenant use. Every
-tool it exposes takes a `namespace` (a [Kayra](https://github.com/infrapi/kayra)
-namespace). Before each call, ulgen makes sure the caller may act there. It
-then calls the upstream with the right credential: the caller's own token,
-or the namespace's credential, read from Vault.
+ulgen is one MCP endpoint in front of the platform's APIs. Every API built
+on [infrapi/lib](https://infrapi.github.io/lib/) serves its own MCP endpoint,
+`<root>/-/mcp`. ulgen finds these APIs in Kayra's catalog and serves all
+their tools behind a single endpoint. An AI agent connects once, logs in at
+Kayra once, and reaches every API.
 
 ```text
-MCP client ──Bearer <caller's Kayra token>──► ulgen ─┬─► mcp-grafana   (namespace credential from Vault)
-                                                      └─► an infrapi MCP (caller's token)
+MCP client ──Bearer <caller's token>──► ulgen ──► compute.infrapi.io/v1/-/mcp
+                                          │   ──► grafana.infrapi.io/v1/-/mcp
+                                          │        (mcp-grafana bridged by tofu-api)
+                                          └─ Kayra: who calls, which APIs, which namespaces
 ```
 
-An AI agent connects once, logs in at Kayra once, and gets a single set of
-tools:
+ulgen decides nothing about rights. Each call goes to its API with the
+caller's own token, and the API checks it as it checks any of its routes:
+the token, Kayra's RBAC, the contract. ulgen adds:
 
-- **One endpoint**: `/mcp` serves every upstream's tools, named
-  `<upstream>_<tool>`. `/mcp/<upstream>` serves one upstream's tools under
-  their own names.
-- **Namespaces**: an upstream with no notion of namespace, mcp-grafana for one,
-  gets a `namespace` argument, and the namespace's own credential behind it. An
-  infrapi MCP's own `namespace` argument is exposed as it is. `list_namespaces`
-  answers the caller's namespaces and the upstreams usable in each.
-- **Rights in Kayra**: ulgen asks Kayra's `/check` before each call, on a
-  resource per tool family (`prometheus`, `loki`, `dashboards`...). It
-  serves the OpenAPI document Kayra registers the api from. Namespace roles
-  then grant or withhold a family, as for any other api. An upstream built
-  on infrapi/lib checks its calls itself, with the caller's token.
-- **Only the tools you list**: `allowed_tools` regular expressions decide
-  which upstream tools are listed and callable.
-- **Traceable**: one audit line per call, with its request id, which ulgen
-  passes on to the upstream. Prometheus metrics at `/metrics`.
+- **One endpoint**: `<root>/-/mcp` serves every API's tools, named
+  `<short_name>_<tool>` (`compute_get_vm`). `<root>/-/mcp/<short_name>`
+  serves one API's tools under their own names.
+- **Discovery**: the APIs come from Kayra's catalog, with the caller's token.
+  An API whose contract has an MCP endpoint is served. A new API shows up
+  without a restart.
+- **`list_namespaces`**: the Kayra namespaces the caller belongs to, the
+  `namespace` argument of the APIs' tools.
+- **The login**: a request without a valid token gets a 401 that names
+  ulgen's protected resource metadata (RFC 9728). An MCP client logs in at
+  Kayra from there.
+- **Traceable**: one audit line per call, the request id passed on to the
+  API, Prometheus metrics.
+
+ulgen is an infrapi/lib service like the others: the same settings
+(`INFRAPI_APP_*`, then its own `INFRAPI_ULGEN_*`), the same operational
+endpoints (`-/healthz`, `-/metrics`...), the same errors.
+
+An MCP server that is not an infrapi API, mcp-grafana for one, is served
+through an API that bridges it: tofu-api's
+[`mcp.bridges`](https://infrapi.github.io/tofu-api/mcp/), or lib's
+[mcp/bridge](https://infrapi.github.io/lib/packages/mcp/). Its tools are then
+resources of that API, granted per namespace by Kayra's roles.
 
 ## Where to start
 
 | I want to... | Go to |
 |---|---|
 | Run ulgen and connect an MCP client | [Getting started](getting-started.md) |
-| Choose which tools are exposed, and how namespaces are named | [Tools and namespaces](tools.md) |
-| Grant or withhold tools per namespace in Kayra | [Authorization](authorization.md) |
+| Know which APIs and tools ulgen serves | [APIs and tools](apis.md) |
 | Understand how callers authenticate, and the 401 that starts an MCP client's login | [Callers](callers.md) |
-| Give an upstream its credentials | [Credentials](credentials.md) |
 | Follow a call through the logs, and scrape the metrics | [Audit log and metrics](observability.md) |
-| Look up a configuration key | [Configuration](configuration.md) |
+| Look up a setting | [Configuration](configuration.md) |
