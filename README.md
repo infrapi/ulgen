@@ -37,4 +37,5 @@ go test -race ./...
 ```
 
 Releases: on `main`, a `feat` or `fix` commit makes go-semantic-release tag the next version, and
-GoReleaser publishes the Linux archives and `checksums.txt`.
+GoReleaser publishes the Linux archives, `checksums.txt` and the image `ghcr.io/infrapi/ulgen`
+([infrapi/ci](https://github.com/infrapi/ci)'s Go workflow).

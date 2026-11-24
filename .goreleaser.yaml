@@ -25,3 +25,41 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# The container image, multi-platform, on every release: the binary above
+# in the Dockerfile at the repository root. Tags: the version (0.5.0), its
+# minor (0.5) and latest, the last two only for a release that is not a
+# pre-release. The CI logs in to ghcr.io first.
+dockers_v2:
+  - id: ulgen
+    ids: [ulgen]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/infrapi/ulgen
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: ulgen
+      org.opencontainers.image.description: ulgen, one MCP endpoint in front of the platform's APIs
+      org.opencontainers.image.source: https://github.com/infrapi/ulgen
+      org.opencontainers.image.url: https://github.com/infrapi/ulgen
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+
+# go-semantic-release (infrapi/ci's workflow) tags and creates the GitHub
+# release with its own notes before this runs: append the built artifacts
+# to it rather than writing a second changelog.
+release:
+  mode: append
+
+changelog:
+  disable: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"

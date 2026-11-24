@@ -24,18 +24,51 @@ You need:
 
 ## 1. Install
 
-Linux archives (amd64, arm64) are on the
-[releases page](https://github.com/infrapi/ulgen/releases), with
-`checksums.txt`:
+`ulgen` is published on every
+[release](https://github.com/infrapi/ulgen/releases) for Linux: an archive
+per architecture (`ulgen_<version>_linux_<arch>`, with `ulgen.env.example`),
+with `checksums.txt`. Install it with
+[bin](https://github.com/marcosnils/bin/), which picks the archive matching
+your OS and architecture, puts the binary on your `PATH` and tracks it for
+`bin update`:
 
 ```bash
-v=$(curl -fsSL https://api.github.com/repos/infrapi/ulgen/releases/latest | jq -r .tag_name | tr -d v)
-curl -fsSLO "https://github.com/infrapi/ulgen/releases/download/v$v/ulgen_${v}_linux_amd64.tar.gz"
-tar -xzf "ulgen_${v}_linux_amd64.tar.gz" ulgen ulgen.env.example
-./ulgen -version
+bin install github.com/infrapi/ulgen ~/.local/bin/ulgen
+ulgen -version
 ```
 
-Or build a container image from the repository's `Dockerfile`.
+### Or the container image
+
+Every release also publishes an image, `ghcr.io/infrapi/ulgen`, for
+`linux/amd64` and `linux/arm64`, tagged with the version
+(`<major>.<minor>.<patch>`), its minor (`<major>.<minor>`) and `latest`: pin
+one of the first two in a deployment. It runs as an unprivileged user (uid
+10001). It holds `ulgen` and no configuration: mount its dotenv
+([step 2](#2-configure)) at `/etc/ulgen/ulgen.env`, with
+`INFRAPI_APP_LISTEN_ADDRESS="0.0.0.0:9700"` to be reached from outside the
+container.
+
+```bash
+podman run --rm -v ./ulgen.env:/etc/ulgen/ulgen.env:ro,z -p 9700:9700 ghcr.io/infrapi/ulgen:latest
+```
+
+### Or with Go
+
+With Go 1.27.4 or later:
+
+```bash
+go install github.com/infrapi/ulgen/cmd/ulgen@latest
+```
+
+<details>
+<summary>Building from source instead</summary>
+
+```bash
+git clone https://github.com/infrapi/ulgen && cd ulgen
+go build -o ulgen ./cmd/ulgen
+```
+
+</details>
 
 ## 2. Configure
 
