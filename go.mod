@@ -1,9 +1,9 @@
 module github.com/infrapi/ulgen
 
-go 1.27.3
+go 1.27.4
 
 require (
-	github.com/infrapi/lib v0.18.0
+	github.com/infrapi/lib v0.21.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.24.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -66,6 +66,8 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
+	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/arch v0.31.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
