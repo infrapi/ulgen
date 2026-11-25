@@ -134,6 +134,19 @@ curl -s https://api.example.com/apis/catalog.infrapi.io/v1/apiregistrations/comp
 # "/apis/compute.infrapi.io/v1/-/mcp"
 ```
 
+**OpenTofu/Terraform**
+
+```hcl
+data "kayra_api_spec" "compute" {
+  api = "compute.infrapi.io"
+}
+
+output "mcp" {
+  value = [for p in data.kayra_api_spec.compute.paths : p.path if endswith(p.path, "/-/mcp")]
+  # ["/apis/compute.infrapi.io/v1/-/mcp"]
+}
+```
+
 ## 6. Connect an MCP client
 
 ```bash
