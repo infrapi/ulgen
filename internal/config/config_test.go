@@ -41,6 +41,11 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, c.ToolsTTL)
 	assert.True(t, c.Serves("compute.infrapi.io"))
 	assert.False(t, c.Serves("mcp.infrapi.io"), "not its own")
+	assert.Empty(t, c.Resource, "ulgen's own URL")
+
+	c, err = load(t, map[string]string{"INFRAPI_ULGEN_RESOURCE": "https://api.example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.example.com", c.Resource)
 }
 
 // INFRAPI_ULGEN_APIS_INCLUDE and _EXCLUDE: whole names.
@@ -67,6 +72,7 @@ func TestRefused(t *testing.T) {
 		"bad gateway":     {"INFRAPI_ULGEN_GATEWAY_URL": "nope"},
 		"bad ttl":         {"INFRAPI_ULGEN_TOOLS_TTL": "soon"},
 		"bad cache ttl":   {"INFRAPI_ULGEN_AUTH_CACHE_TTL": "soon"},
+		"bad resource":    {"INFRAPI_ULGEN_RESOURCE": "not a url"},
 		"bad include":     {"INFRAPI_ULGEN_APIS_INCLUDE": "("},
 		"bad exclude":     {"INFRAPI_ULGEN_APIS_EXCLUDE": "("},
 		"no app":          {"INFRAPI_APP_NAME": "-"},

@@ -29,6 +29,12 @@ type Config struct {
 	// GatewayURL is where the APIs are reached: INFRAPI_ULGEN_GATEWAY_URL,
 	// AuthURL when unset.
 	GatewayURL string
+	// Resource is what MCP clients ask their tokens for (the protected
+	// resource metadata's resource): INFRAPI_ULGEN_RESOURCE, ulgen's own URL
+	// (AppUrl and its root) when unset. ulgen passes the caller's token on to
+	// the APIs, which accept it only if issued for them or a URL they are
+	// under: the gateway's, a URL ulgen's root is under too.
+	Resource string
 	// Include and Exclude select the APIs served, a regular expression on
 	// the API's whole name: INFRAPI_ULGEN_APIS_INCLUDE (every API when
 	// unset) and INFRAPI_ULGEN_APIS_EXCLUDE (none when unset).
@@ -67,6 +73,9 @@ func FromVariables(vars *libconfig.Variables) (*Config, error) {
 		return nil, err
 	}
 	if c.GatewayURL, err = vars.GetString(&libconfig.VariableOpts{Key: "INFRAPI_ULGEN_GATEWAY_URL", Default: c.AuthURL, Validator: "url"}); err != nil {
+		return nil, err
+	}
+	if c.Resource, err = vars.GetString(&libconfig.VariableOpts{Key: "INFRAPI_ULGEN_RESOURCE", Optional: true, Validator: "omitempty,url"}); err != nil {
 		return nil, err
 	}
 	if c.ToolsTTL, err = vars.GetDuration(&libconfig.VariableOpts{Key: "INFRAPI_ULGEN_TOOLS_TTL", Default: "5m"}); err != nil {

@@ -67,7 +67,12 @@ func run() (err error) {
 	root := cfg.Root()
 	// a 401 names <root>/-/oauth-protected-resource: an MCP client logs in at
 	// Kayra from there
-	engine, err := server.NewServerGin(cfg.App, []string{root}, server.WithProtectedResource(client.AuthorizationServer))
+	opts := []server.Option{server.WithProtectedResource(client.AuthorizationServer)}
+	if cfg.Resource != "" {
+		// the gateway's: the token is then good for the APIs too
+		opts = append(opts, server.WithResource(cfg.Resource))
+	}
+	engine, err := server.NewServerGin(cfg.App, []string{root}, opts...)
 	if err != nil {
 		return err
 	}
