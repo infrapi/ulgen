@@ -4,7 +4,7 @@ go 1.27.4
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/infrapi/lib v0.24.0
+	github.com/infrapi/lib v0.26.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
