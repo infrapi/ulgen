@@ -1,8 +1,8 @@
-# ulgen
+# Ülgen
 
 One MCP endpoint in front of the platform's APIs. Every API built on
 [infrapi/lib](https://github.com/infrapi/lib) serves its own MCP endpoint
-(`<root>/-/mcp`); ulgen finds them in [Kayra](https://github.com/infrapi/kayra)'s
+(`<root>/-/mcp`); Ülgen finds them in [Kayra](https://github.com/infrapi/kayra)'s
 catalog and serves all their tools behind one endpoint, every call made with
 the caller's own token: each API checks it, as for any of its routes.
 
@@ -17,7 +17,7 @@ MCP client ──Bearer <caller's token>──► ulgen ──► compute.infrap
 - `/apis/<INFRAPI_ULGEN_API>/v1/-/mcp`: every API's tools, `<short_name>_<tool>`;
   `.../-/mcp/<short_name>`: one API's, under their own names. Each has
   `list_namespaces`, the caller's Kayra namespaces.
-- A request without a valid token gets a 401 naming ulgen's protected resource
+- A request without a valid token gets a 401 naming Ülgen's protected resource
   metadata (RFC 9728): MCP clients log in at Kayra from there.
 - The APIs: Kayra's `GET /apis` and the contract it last read from each, with
   the caller's token; an API whose contract has its MCP endpoint is served.

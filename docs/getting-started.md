@@ -1,12 +1,12 @@
 ---
 title: Getting started
-description: Install ulgen, point it at Kayra, route it through the gateway, and connect an MCP client to every API at once.
+description: Install Ülgen, point it at Kayra, route it through the gateway, and connect an MCP client to every API at once.
 weight: 20
 ---
 
 # Getting started
 
-This page runs ulgen in front of the platform's APIs, then connects Claude
+This page runs Ülgen in front of the platform's APIs, then connects Claude
 Code to it.
 
 You need:
@@ -17,7 +17,7 @@ You need:
 - at least one API built on infrapi/lib that serves MCP, registered in Kayra:
   the `compute` API of [Develop an API](https://infrapi.github.io/cli/develop/develop-an-api/),
   or a tofu-api;
-- a gateway in front of them (APISIX, say), where ulgen will be routed too.
+- a gateway in front of them (APISIX, say), where Ülgen will be routed too.
 
 `infrapi-cli`, to check what Kayra knows:
 [install it](https://infrapi.github.io/cli/getting-started/#1-install).
@@ -72,7 +72,7 @@ go build -o ulgen ./cmd/ulgen
 
 ## 2. Configure
 
-ulgen reads a dotenv file, `INFRAPI_CONFIG_DOTENV_FILE`, as every infrapi/lib
+Ülgen reads a dotenv file, `INFRAPI_CONFIG_DOTENV_FILE`, as every infrapi/lib
 service does. From [`ulgen.env.example`](https://github.com/infrapi/ulgen/blob/main/ulgen.env.example):
 
 ```bash
@@ -101,8 +101,8 @@ curl -s localhost:9700/apis/mcp.infrapi.io/v1/-/healthz
 
 ## 4. Route it
 
-On the gateway, route `/apis/mcp.infrapi.io/*` to ulgen, as any API.
-ulgen serves under that root:
+On the gateway, route `/apis/mcp.infrapi.io/*` to Ülgen, as any API.
+Ülgen serves under that root:
 
 | Path | |
 |---|---|
@@ -110,13 +110,13 @@ ulgen serves under that root:
 | `/apis/mcp.infrapi.io/v1/-/mcp/<short_name>` | one API's tools |
 | `/apis/mcp.infrapi.io/v1/-/oauth-protected-resource` | the protected resource metadata a 401 names |
 
-ulgen is not registered in Kayra: it owns no resource, and asks Kayra
+Ülgen is not registered in Kayra: it owns no resource, and asks Kayra
 everything with the caller's token.
 
 ## 5. Check what it serves
 
-ulgen serves the APIs Kayra lists whose contract, as Kayra last read it,
-has an MCP endpoint. To see them, as ulgen does:
+Ülgen serves the APIs Kayra lists whose contract, as Kayra last read it,
+has an MCP endpoint. To see them, as Ülgen does:
 
 **infrapi-cli**
 
@@ -153,11 +153,11 @@ output "mcp" {
 claude mcp add --transport http infrapi https://api.example.com/apis/mcp.infrapi.io/v1/-/mcp
 ```
 
-The client's first request gets a 401 that names ulgen's protected resource
+The client's first request gets a 401 that names Ülgen's protected resource
 metadata. The client logs in at Kayra (login and consent in the browser) and
 retries with its token. Ask it to `list_namespaces`, then to read a VM of
 one of them: `compute_get_vm`.
 
-Each call is one `tool call` line in ulgen's log: who called which tool of
+Each call is one `tool call` line in Ülgen's log: who called which tool of
 which API, in which namespace, and how it ended. See
 [Audit log and metrics](observability.md).

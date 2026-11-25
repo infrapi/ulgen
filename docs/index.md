@@ -1,14 +1,14 @@
 ---
-title: ulgen
+title: Ülgen
 description: One MCP endpoint in front of the platform's APIs, found in Kayra's catalog, every call made as the caller.
 weight: 10
 ---
 
-# ulgen
+# Ülgen
 
-ulgen is one MCP endpoint in front of the platform's APIs. Every API built
+Ülgen is one MCP endpoint in front of the platform's APIs. Every API built
 on [infrapi/lib](https://infrapi.github.io/lib/) serves its own MCP endpoint,
-`<root>/-/mcp`. ulgen finds these APIs in Kayra's catalog and serves all
+`<root>/-/mcp`. Ülgen finds these APIs in Kayra's catalog and serves all
 their tools behind a single endpoint. An AI agent connects once, logs in at
 Kayra once, and reaches every API.
 
@@ -19,9 +19,9 @@ MCP client ──Bearer <caller's token>──► ulgen ──► compute.infrap
                                           └─ Kayra: who calls, which APIs, which namespaces
 ```
 
-ulgen decides nothing about rights. Each call goes to its API with the
+Ülgen decides nothing about rights. Each call goes to its API with the
 caller's own token, and the API checks it as it checks any of its routes:
-the token, Kayra's RBAC, the contract. ulgen adds:
+the token, Kayra's RBAC, the contract. Ülgen adds:
 
 - **One endpoint**: `<root>/-/mcp` serves every API's tools, named
   `<short_name>_<tool>` (`compute_get_vm`). `<root>/-/mcp/<short_name>`
@@ -32,12 +32,12 @@ the token, Kayra's RBAC, the contract. ulgen adds:
 - **`list_namespaces`**: the Kayra namespaces the caller belongs to, the
   `namespace` argument of the APIs' tools.
 - **The login**: a request without a valid token gets a 401 that names
-  ulgen's protected resource metadata (RFC 9728). An MCP client logs in at
+  Ülgen's protected resource metadata (RFC 9728). An MCP client logs in at
   Kayra from there.
 - **Traceable**: one audit line per call, the request id passed on to the
   API, Prometheus metrics.
 
-ulgen is an infrapi/lib service like the others: the same settings
+Ülgen is an infrapi/lib service like the others: the same settings
 (`INFRAPI_APP_*`, then its own `INFRAPI_ULGEN_*`), the same operational
 endpoints (`-/healthz`, `-/metrics`...), the same errors.
 
@@ -51,8 +51,8 @@ resources of that API, granted per namespace by Kayra's roles.
 
 | I want to... | Go to |
 |---|---|
-| Run ulgen and connect an MCP client | [Getting started](getting-started.md) |
-| Know which APIs and tools ulgen serves | [APIs and tools](apis.md) |
+| Run Ülgen and connect an MCP client | [Getting started](getting-started.md) |
+| Know which APIs and tools Ülgen serves | [APIs and tools](apis.md) |
 | Understand how callers authenticate, and the 401 that starts an MCP client's login | [Callers](callers.md) |
 | Follow a call through the logs, and scrape the metrics | [Audit log and metrics](observability.md) |
 | Look up a setting | [Configuration](configuration.md) |
