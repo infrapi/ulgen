@@ -33,11 +33,18 @@ gateway but the route to ulgen. Kayra's side is its
 ## The token's audience
 
 A token of Kayra's authorization server is issued for a resource, its
-`aud`. ulgen accepts one whose `aud` is its own URL
-(`INFRAPI_APP_URL` and its root) or a URL it is under; so does every
-infrapi/lib API. Serve ulgen and the APIs under one host, the gateway, and
-make that host one of Kayra's `oauth2.resources`: the token the client gets
-for ulgen is then good for every API ulgen calls with it.
+`aud`: the one the protected resource metadata names, which the client asks
+for. ulgen passes the caller's token on to the APIs, and an infrapi/lib API
+accepts it only when its `aud` is the API's URL or a URL the API is under.
+A token for ulgen's own URL (`<gateway>/apis/mcp.infrapi.io/v1`) would be
+refused by every API.
+
+So name the gateway's URL, `INFRAPI_ULGEN_RESOURCE`: the metadata then says
+`"resource": "https://api.example.com"`, the client gets a token for the
+whole gateway, and ulgen, under it, accepts it as every API behind it does.
+Kayra issues it if that URL is one of its `oauth2.resources`. The APIs must
+know their own URL as the gateway's too: their `INFRAPI_APP_URL` is the
+gateway, not their node's address.
 
 ## The caller's token, everywhere
 

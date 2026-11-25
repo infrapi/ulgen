@@ -35,6 +35,7 @@ region, listen address, logs, CORS... See lib's
 | `INFRAPI_ULGEN_AUTH_URL` | required | Kayra's URL: the callers, the APIs, the namespaces |
 | `INFRAPI_ULGEN_AUTH_CACHE_TTL` | `1m` | how long a caller's identity is kept |
 | `INFRAPI_ULGEN_GATEWAY_URL` | `INFRAPI_ULGEN_AUTH_URL` | where the APIs are reached: `<gateway>/apis/<api>/<version>/-/mcp` |
+| `INFRAPI_ULGEN_RESOURCE` | ulgen's own URL | what MCP clients ask their tokens for: the gateway's URL, so that the token ulgen passes on is good for the APIs too ([Callers](callers.md#the-tokens-audience)) |
 | `INFRAPI_ULGEN_APIS_INCLUDE` | every API | a regular expression on an API's whole name: the APIs served |
 | `INFRAPI_ULGEN_APIS_EXCLUDE` | none | a regular expression on an API's whole name: the APIs left out |
 | `INFRAPI_ULGEN_TOOLS_TTL` | `5m` | how long the APIs and their tools are kept before they are listed again |

@@ -86,6 +86,7 @@ INFRAPI_APP_LISTEN_ADDRESS="127.0.0.1:9700"
 
 INFRAPI_ULGEN_API="mcp.infrapi.io"             # ulgen's endpoints: /apis/mcp.infrapi.io/v1
 INFRAPI_ULGEN_AUTH_URL="https://api.example.com"   # Kayra
+INFRAPI_ULGEN_RESOURCE="https://api.example.com"   # the tokens: good for every API behind the gateway
 ```
 
 Every setting is in [Configuration](configuration.md).
