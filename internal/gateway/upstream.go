@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/infrapi/lib/pkg/logger"
+	"github.com/infrapi/lib/pkg/std"
 )
 
 // callTimeout bounds one upstream HTTP request.
@@ -83,7 +84,8 @@ func newUpstreamClient(url, protocol string, static http.Header, base http.Round
 		client:   mcp.NewClient(&mcp.Implementation{Name: "ulgen", Version: "v1"}, nil),
 		// Bounds a whole call, streamed response included: long enough for
 		// a heavy Loki or Prometheus query, short enough not to hang.
-		http: &http.Client{Transport: headerTransport{static: static, next: base}, Timeout: callTimeout},
+		// ulgen/<version> in the User-Agent (std): the MCP server's logs tell ulgen
+		http: &http.Client{Transport: headerTransport{static: static, next: std.UserAgentTransport(base)}, Timeout: callTimeout},
 		log:  log,
 	}
 }

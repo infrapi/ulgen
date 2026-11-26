@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 func kayraServer(t *testing.T, routes map[string][2]string) *kayra.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// every request names ulgen: ulgen/<version>, not Go's default
+		assert.True(t, strings.HasPrefix(r.UserAgent(), "ulgen/"), "User-Agent %q", r.UserAgent())
 		if r.URL.Path == auth.DiscoveryPath {
 			if _, own := routes[auth.DiscoveryPath]; !own {
 				w.Header().Set("Content-Type", "application/json")

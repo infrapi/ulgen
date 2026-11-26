@@ -15,6 +15,7 @@ import (
 	"github.com/infrapi/lib/pkg/auth"
 	infraerrors "github.com/infrapi/lib/pkg/errors"
 	"github.com/infrapi/lib/pkg/server"
+	"github.com/infrapi/lib/pkg/std"
 )
 
 // API is an API of the platform that serves MCP.
@@ -41,7 +42,7 @@ type Client struct {
 // New is a client of the Kayra at baseURL; a, its auth client, reads its
 // discovery document.
 func New(a *auth.Client, baseURL string, timeout time.Duration) *Client {
-	return &Client{auth: a, baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: timeout}}
+	return &Client{auth: a, baseURL: strings.TrimRight(baseURL, "/"), http: std.UserAgentClient(&http.Client{Timeout: timeout})} // ulgen/<version>
 }
 
 // group is one API group of Kayra's GET /apis.
